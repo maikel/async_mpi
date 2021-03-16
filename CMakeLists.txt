@@ -4,7 +4,7 @@ project(AsyncMPI CXX C)
 
 find_package(MPI REQUIRED C CXX)
 
-find_package(TBB REQURIED)
+find_package(TBB REQUIRED)
 
 option(BUILD_TESTING "" OFF)
 option(UNIFEX_BUILD_EXAMPLES "" OFF)
