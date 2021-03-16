@@ -1,3 +1,5 @@
+![Build Status](https://github.com/maikel/async_mpi/actions/workflows/cmake.yml/badge.svg)
+
 # Asynchronous Communication and Computation
 
 This library attempts to wrap communication procudures of MPI with concepts found in [libunifex](https://github.com/facebookexperimental/libunifex).
