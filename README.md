@@ -17,8 +17,10 @@ This library provides thin wrappers around those MPI calls and enables the usage
 
 The above example could read instead
 ```cpp
-// Returns a ManySender wait-all type that will lazily start an a user-defined specified executor thread.
-// This will send a request index for each request that finished execution
+// Returns a ManySender wait-all type that will lazily start on an user-defined executor thread.
+// If started, this will blockingly send a request index for each request that finished execution.
+// Dot *not* use this on an executor that is intended for doing computations, 
+// such as Intel TBB thread scheduler.
 auto WaitAll(std::vector<MPI_Request> pending_request, int tag) {
   return ampi::wait_all(std::move(pending_requset), tag);
 }
