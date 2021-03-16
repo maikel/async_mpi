@@ -1,0 +1,3 @@
+[submodule "ext/libunifex"]
+	path = ext/libunifex
+	url = https://github.com/facebookexperimental/libunifex.git
