@@ -55,15 +55,21 @@ namespace ampi
       tbb::task_group_status status = tbb::task_group_status::not_complete;
     };
 
-    template <typename R>
+    template <typename Receiver>
     struct _op {
-      [[no_unique_address]] R receiver_;
+      [[no_unique_address]] Receiver receiver_;
       tbb_task_group_scheduler scheduler_;
+
+      static_assert(unifex::receiver_of<Receiver>);
 
       void start() & noexcept {
         if (scheduler_.context_) {
-          scheduler_.context_->group.run(
-              [r = &receiver_]() { unifex::set_value(std::move(*r)); });
+          try {
+            scheduler_.context_->group.run(
+                [r = &receiver_]() { unifex::set_value(std::move(*r)); });
+          } catch (...) {
+            unifex::set_error(std::move(receiver_), std::current_exception());
+          }
         } else {
           unifex::set_done(std::move(receiver_));
         }
@@ -102,6 +108,7 @@ namespace ampi
       return _sender{*this};
     }
 
+    static_assert(unifex::typed_sender<_sender>);
     static_assert(unifex::scheduler<tbb_task_group_scheduler>);
 
   }  // namespace _tbb_task_group_scheduler
