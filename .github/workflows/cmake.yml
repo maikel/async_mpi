@@ -1,4 +1,4 @@
-name: CMake
+name: Build on gcc-10.2
 
 on: [push]
 
