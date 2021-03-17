@@ -77,23 +77,20 @@ int main() {
             }),
         ampi::mpi_abort_on_error{comm});
 
-    submit(
-        on(bulk_join(ampi::bulk_finally(
-               ampi::for_each(comm, std::move(requests), tag),
-               [comm_rank, &intel_tbb](int index) {
-                 const std::size_t thread_id =
-                     std::hash<std::thread::id>{}(std::this_thread::get_id());
-                 std::printf(
-                     "%d-%zu: Received request at index %d.\n", comm_rank, thread_id, index);
-                 auto work = transform(unifex::schedule(intel_tbb), [comm_rank] {
-                   const std::size_t thread_id =
-                       std::hash<std::thread::id>{}(std::this_thread::get_id());
-                   std::printf("%d-%zu: On TBB thread.\n", comm_rank, thread_id);
-                 });
-                 return std::tuple{work, work, work};
-               })),
-           communication_thread.get_scheduler()),
-        ampi::mpi_abort_on_error{comm});
+    sync_wait(
+        bulk_join(ampi::bulk_finally(
+            ampi::for_each(comm, std::move(requests), tag),
+            [comm_rank, &intel_tbb](int index) {
+              const std::size_t thread_id =
+                  std::hash<std::thread::id>{}(std::this_thread::get_id());
+              std::printf("%d-%zu: Received request at index %d.\n", comm_rank, thread_id, index);
+              auto work = transform(unifex::schedule(intel_tbb), [comm_rank] {
+                const std::size_t thread_id =
+                    std::hash<std::thread::id>{}(std::this_thread::get_id());
+                std::printf("%d-%zu: On TBB thread.\n", comm_rank, thread_id);
+              });
+              return std::tuple{work, work, work};
+            })));
 
     submit(
         transform(
