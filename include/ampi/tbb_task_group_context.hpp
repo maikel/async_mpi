@@ -4,116 +4,71 @@
 #include <unifex/sender_concepts.hpp>
 
 #include <tbb/parallel_invoke.h>
-#include <tbb/task_group.h>
+#include <tbb/task_arena.h>
 
-namespace ampi
-{
-  namespace _tbb_task_group_scheduler
-  {
-    template <typename R>
-    struct _op;
-    template <typename R>
-    using op = _op<std::remove_cvref_t<R>>;
+namespace ampi {
+namespace tbb_task_scheduler_ns {
+template <typename R>
+struct operation;
+template <typename R>
+using op = operation<std::remove_cvref_t<R>>;
 
-    struct _sender;
-    class tbb_task_group_context;
+struct sender;
+struct tbb_task_scheduler {
+  tbb::task_arena* arena_;
 
-    class tbb_task_group_scheduler {
-    public:
-      tbb_task_group_scheduler(tbb_task_group_context& context)
-        : context_{&context} {}
-      _sender schedule() const noexcept;
+  tbb_task_scheduler(tbb::task_arena& arena) : arena_{&arena} {}
 
-      friend auto operator<=>(
-          const tbb_task_group_scheduler&,
-          const tbb_task_group_scheduler&) = default;
+  sender schedule() const noexcept;
 
-    private:
-      template <typename R>
-      friend class _op;
-      tbb_task_group_context* context_;
-    };
+  friend auto operator<=>(const tbb_task_scheduler&, const tbb_task_scheduler&) = default;
+};
 
-    class tbb_task_group_context {
-    public:
-      tbb_task_group_context() = default;
-      ~tbb_task_group_context() noexcept { wait(); }
+template <typename Receiver>
+struct operation {
+  [[no_unique_address]] Receiver receiver_;
+  tbb::task_arena* arena_;
 
-      tbb_task_group_scheduler get_scheduler() noexcept { return *this; }
+  static_assert(unifex::receiver_of<Receiver>);
 
-      tbb::task_group_status wait() noexcept {
-        if (status == tbb::task_group_status::not_complete) {
-          status = group.wait();
-        }
-        return status;
-      }
-
-    private:
-      template <typename R>
-      friend class _op;
-      tbb::task_group group{};
-      tbb::task_group_status status = tbb::task_group_status::not_complete;
-    };
-
-    template <typename Receiver>
-    struct _op {
-      [[no_unique_address]] Receiver receiver_;
-      tbb_task_group_scheduler scheduler_;
-
-      static_assert(unifex::receiver_of<Receiver>);
-
-      void start() & noexcept {
-        if (scheduler_.context_) {
-          try {
-            scheduler_.context_->group.run(
-                [r = &receiver_]() { unifex::set_value(std::move(*r)); });
-          } catch (...) {
-            unifex::set_error(std::move(receiver_), std::current_exception());
-          }
-        } else {
-          unifex::set_done(std::move(receiver_));
-        }
-      }
-    };
-
-    struct _sender {
-      template <
-          template <typename...>
-          class Variant,
-          template <typename...>
-          class Tuple>
-      using value_types = Variant<Tuple<>>;
-
-      template <
-          template <typename...>
-          class Variant,
-          template <typename...>
-          class Tuple>
-      using next_types = Variant<Tuple<>>;
-
-      template <template <typename...> class Variant>
-      using error_types = Variant<std::exception_ptr>;
-
-      static constexpr bool sends_done = true;
-
-      template <typename R>
-      op<R> connect(R&& receiver) const& noexcept {
-        return {std::move(receiver), scheduler_};
-      }
-
-      tbb_task_group_scheduler scheduler_;
-    };
-
-    inline _sender tbb_task_group_scheduler::schedule() const noexcept {
-      return _sender{*this};
+  void start() & noexcept {
+    try {
+      arena_->enqueue([&] { unifex::set_value(std::move(receiver_)); });
+    } catch (...) {
+      unifex::set_error(std::move(receiver_), std::current_exception());
     }
+  }
+};
 
-    static_assert(unifex::typed_sender<_sender>);
-    static_assert(unifex::scheduler<tbb_task_group_scheduler>);
+struct sender {
+  tbb::task_arena* arena_;
 
-  }  // namespace _tbb_task_group_scheduler
+  template <template <typename...> class Variant, template <typename...> class Tuple>
+  using value_types = Variant<Tuple<>>;
 
-  using _tbb_task_group_scheduler::tbb_task_group_context;
-  using _tbb_task_group_scheduler::tbb_task_group_scheduler;
+  template <template <typename...> class Variant, template <typename...> class Tuple>
+  using next_types = Variant<Tuple<>>;
+
+  template <template <typename...> class Variant>
+  using error_types = Variant<std::exception_ptr>;
+
+  static constexpr bool sends_done = true;
+
+  template <typename R>
+  auto connect(R&& receiver) const& noexcept {
+    return operation<std::remove_cvref_t<R>>{std::move(receiver), arena_};
+  }
+};
+
+inline sender tbb_task_scheduler::schedule() const noexcept {
+  return sender{arena_};
+}
+
+static_assert(unifex::typed_sender<sender>);
+static_assert(unifex::scheduler<tbb_task_scheduler>);
+
+}  // namespace tbb_task_scheduler_ns
+
+using tbb_task_scheduler_ns::tbb_task_scheduler;
 
 }  // namespace ampi
