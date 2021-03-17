@@ -2,6 +2,8 @@
 #include "ampi/tbb_task_group_context.hpp"
 #include "ampi/for_each.hpp"
 
+#include <tbb/task_arena.h>
+
 #include <mpi.h>
 
 #include <unifex/bulk_join.hpp>
@@ -60,11 +62,12 @@ int main() {
       AMPI_CALL_MPI(MPI_Irecv(datas[i].data(), size, MPI_INT, from_rank, tag, comm, &requests[i]));
     }
 
-    ampi::tbb_task_group_context intel_tbb;
+    tbb::task_arena arena{};
+    ampi::tbb_task_scheduler intel_tbb{arena};
 
     submit(
         transform(
-            schedule(intel_tbb.get_scheduler()),
+            schedule(intel_tbb),
             [comm_rank] {
               const std::size_t thread_id =
                   std::hash<std::thread::id>{}(std::this_thread::get_id());
@@ -74,24 +77,20 @@ int main() {
 
     single_thread_context communication_thread{};
 
-    sync_wait(
-        on(bulk_join(bulk_transform(
-               ampi::for_each(comm, std::move(requests), tag),
-               [comm_rank](int index) {
-                 const std::size_t thread_id =
-                     std::hash<std::thread::id>{}(std::this_thread::get_id());
-                 std::printf(
-                     "%d-%zu: Recieved request at index %d.\n",
-                     comm_rank,
-                     thread_id,
-                     index);
-               },
-               par_unseq)),
-           communication_thread.get_scheduler()));
+    sync_wait(on(
+        bulk_join(bulk_transform(
+            ampi::for_each(comm, std::move(requests), tag),
+            [comm_rank](int index) {
+              const std::size_t thread_id =
+                  std::hash<std::thread::id>{}(std::this_thread::get_id());
+              std::printf("%d-%zu: Recieved request at index %d.\n", comm_rank, thread_id, index);
+            },
+            par_unseq)),
+        communication_thread.get_scheduler()));
 
     submit(
         transform(
-            schedule(intel_tbb.get_scheduler()),
+            schedule(intel_tbb),
             [comm_rank] {
               const std::size_t thread_id =
                   std::hash<std::thread::id>{}(std::this_thread::get_id());

@@ -62,19 +62,20 @@ int main() {
       AMPI_CALL_MPI(MPI_Irecv(datas[i].data(), size, MPI_INT, from_rank, tag, comm, &requests[i]));
     }
 
-    ampi::tbb_task_group_context intel_tbb;
+    single_thread_context communication_thread{};
+
+    tbb::task_arena arena{};
+    ampi::tbb_task_scheduler intel_tbb{arena};
 
     submit(
         transform(
-            schedule(intel_tbb.get_scheduler()),
+            schedule(intel_tbb),
             [comm_rank] {
               const std::size_t thread_id =
                   std::hash<std::thread::id>{}(std::this_thread::get_id());
               std::printf("%d-%zu: Hello TBB #1.\n", comm_rank, thread_id);
             }),
         ampi::mpi_abort_on_error{comm});
-
-    single_thread_context communication_thread{};
 
     submit(
         on(bulk_join(ampi::bulk_finally(
@@ -84,24 +85,25 @@ int main() {
                      std::hash<std::thread::id>{}(std::this_thread::get_id());
                  std::printf(
                      "%d-%zu: Received request at index %d.\n", comm_rank, thread_id, index);
-                 auto work = transform(unifex::schedule(intel_tbb.get_scheduler()), [comm_rank] {
+                 auto work = transform(unifex::schedule(intel_tbb), [comm_rank] {
                    const std::size_t thread_id =
                        std::hash<std::thread::id>{}(std::this_thread::get_id());
                    std::printf("%d-%zu: On TBB thread.\n", comm_rank, thread_id);
                  });
                  return std::tuple{work, work, work};
                })),
-           communication_thread.get_scheduler()), ampi::mpi_abort_on_error{comm});
+           communication_thread.get_scheduler()),
+        ampi::mpi_abort_on_error{comm});
 
-    // submit(
-    //     transform(
-    //         schedule(intel_tbb.get_scheduler()),
-    //         [comm_rank] {
-    //           const std::size_t thread_id =
-    //               std::hash<std::thread::id>{}(std::this_thread::get_id());
-    //           std::printf("%d-%zu: Hello TBB #2.\n", comm_rank, thread_id);
-    //         }),
-    //     ampi::mpi_abort_on_error{comm});
+    submit(
+        transform(
+            schedule(intel_tbb),
+            [comm_rank] {
+              const std::size_t thread_id =
+                  std::hash<std::thread::id>{}(std::this_thread::get_id());
+              std::printf("%d-%zu: Hello TBB #2.\n", comm_rank, thread_id);
+            }),
+        ampi::mpi_abort_on_error{comm});
   }
 
   AMPI_CALL_MPI(MPI_Wait(&send_request, MPI_STATUS_IGNORE));
