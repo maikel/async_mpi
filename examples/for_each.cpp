@@ -1,6 +1,6 @@
 #include "ampi/mpi_abort_on_error.hpp"
 #include "ampi/tbb_task_group_context.hpp"
-#include "ampi/wait_all.hpp"
+#include "ampi/for_each.hpp"
 
 #include <mpi.h>
 
@@ -36,32 +36,28 @@ int main() {
   AMPI_CALL_MPI(MPI_Comm_size(comm, &comm_size));
   AMPI_CALL_MPI(MPI_Comm_rank(comm, &comm_rank));
 
-  if (comm_size == 1) {
-    return 0;
-  }
-
   const int size = 100;
   const int tag = 0;
   const int root_rank = 0;
 
+  std::vector<int> values(size);
+  std::ranges::fill(values, comm_rank);
+  std::printf("%d: Sending values to %d ...\n", comm_rank, root_rank);
+  MPI_Request send_request = MPI_REQUEST_NULL;
+  AMPI_CALL_MPI(MPI_Isend(values.data(), size, MPI_INT, root_rank, tag, comm, &send_request));
+
   if (comm_rank == root_rank) {
-    std::vector<int> all_data((comm_size - 1) * size);
-    std::vector<std::span<int>> datas(comm_size - 1);
-    std::vector<MPI_Request> requests(comm_size - 1);
+    std::vector<int> all_data(comm_size * size);
+    std::vector<std::span<int>> datas(comm_size);
+    std::vector<MPI_Request> requests(comm_size);
     std::span<int> data(all_data);
     for (int i = 0; i < datas.size(); ++i) {
       datas[i] = data.subspan(0, size);
       data = data.subspan(size);
-      const int from_rank = i + 1;
-      const std::size_t thread_id =
-          std::hash<std::thread::id>{}(std::this_thread::get_id());
-      std::printf(
-          "%d-%zu: Post Irecv values from %d ...\n",
-          comm_rank,
-          thread_id,
-          from_rank);
-      AMPI_CALL_MPI(MPI_Irecv(
-          datas[i].data(), size, MPI_INT, from_rank, tag, comm, &requests[i]));
+      const int from_rank = i;
+      const std::size_t thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+      std::printf("%d-%zu: Post Irecv values from %d ...\n", comm_rank, thread_id, from_rank);
+      AMPI_CALL_MPI(MPI_Irecv(datas[i].data(), size, MPI_INT, from_rank, tag, comm, &requests[i]));
     }
 
     ampi::tbb_task_group_context intel_tbb;
@@ -80,7 +76,7 @@ int main() {
 
     sync_wait(
         on(bulk_join(bulk_transform(
-               ampi::wait_all(comm, std::move(requests), tag),
+               ampi::for_each(comm, std::move(requests), tag),
                [comm_rank](int index) {
                  const std::size_t thread_id =
                      std::hash<std::thread::id>{}(std::this_thread::get_id());
@@ -102,12 +98,8 @@ int main() {
               std::printf("%d-%zu: Hello TBB #2.\n", comm_rank, thread_id);
             }),
         ampi::mpi_abort_on_error{comm});
-
-  } else {
-    std::vector<int> values(size);
-    std::ranges::fill(values, comm_rank);
-    std::printf("%d: Sending values to %d ...\n", comm_rank, root_rank);
-    AMPI_CALL_MPI(MPI_Send(values.data(), size, MPI_INT, root_rank, tag, comm));
-    std::printf("%d: Done.\n", comm_rank);
   }
+
+  AMPI_CALL_MPI(MPI_Wait(&send_request, MPI_STATUS_IGNORE));
+  std::printf("%d: Send done.\n", comm_rank);
 }

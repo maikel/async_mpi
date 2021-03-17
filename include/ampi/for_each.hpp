@@ -9,14 +9,14 @@
 #include <mpi.h>
 
 namespace ampi {
-namespace _wait_all {
+namespace _for_each {
 template <typename R>
-struct _op {
+struct operation {
   struct type;
 };
 
 template <typename R>
-struct _op<R>::type {
+struct operation<R>::type {
 public:
   type(R&& receiver, MPI_Comm comm, std::vector<MPI_Request>&& requests, int tag)
     : receiver_{std::move(receiver)}
@@ -47,16 +47,16 @@ public:
   }
 
 private:
-  R receiver_;
+  [[no_unique_address]] R receiver_;
   MPI_Comm comm_;
   std::vector<MPI_Request> requests_;
   int tag_;
 };
 
 template <typename R>
-using op = _op<std::remove_cvref_t<R>>::type;
+using op = operation<std::remove_cvref_t<R>>::type;
 
-class _sender {
+class sender {
 public:
   template <template <typename...> class Variant, template <typename...> class Tuple>
   using value_types = Variant<Tuple<>>;
@@ -69,7 +69,7 @@ public:
 
   static constexpr bool sends_done = true;
 
-  _sender(MPI_Comm comm, std::vector<MPI_Request> reqs, int tag)
+  sender(MPI_Comm comm, std::vector<MPI_Request> reqs, int tag)
     : comm_{comm}
     , requests_(std::move(reqs))
     , tag_{tag} {}
@@ -80,7 +80,7 @@ private:
   int tag_;
 
   template <typename R>
-  friend auto tag_invoke(unifex::tag_t<unifex::connect>, _sender sender, R&& recv) noexcept {
+  friend auto tag_invoke(unifex::tag_t<unifex::connect>, sender sender, R&& recv) noexcept {
     return op<R>(
         std::move(recv),
         std::move(sender).comm_,
@@ -89,13 +89,13 @@ private:
   }
 };
 
-inline constexpr struct _fn {
+inline constexpr struct fn {
   auto operator()(MPI_Comm comm, std::vector<MPI_Request> requests, int tag) const noexcept {
-    return _sender(comm, std::move(requests), tag);
+    return sender(comm, std::move(requests), tag);
   }
-} wait_all{};
+} for_each{};
 
-}  // namespace _wait_all
+}  // namespace _for_each
 
-using _wait_all::wait_all;
+using _for_each::for_each;
 }  // namespace ampi
