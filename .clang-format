@@ -3,7 +3,7 @@ BasedOnStyle: LLVM
 ---
 Language: Cpp
 Standard: c++20
-ColumnLimit: 80
+ColumnLimit: 100
 TabWidth: 8
 IndentWidth: 2
 UseTab: Never
@@ -36,7 +36,7 @@ BraceWrapping: {
   AfterControlStatement: false,
   AfterEnum: false,
   AfterFunction: false,
-  AfterNamespace: true,
+  AfterNamespace: false,
   AfterStruct: false,
   AfterUnion: false,
   BeforeCatch: false,
@@ -57,29 +57,17 @@ ContinuationIndentWidth: 4
 Cpp11BracedListStyle: true
 FixNamespaceComments: true
 IncludeBlocks: Preserve
-IncludeCategories:
-- Regex: '^<unifex/config.hpp>$'
-  Priority: 1
-- Regex: '^<unifex/detail/'
-  Priority: 3
-- Regex: '^<unifex/'
-  Priority: 2
-- Regex: '^"'
-  Priority: 4
-- Regex: '^<experimental/'
-  Priority: 6
-- Regex: '^<'
-  Priority: 5
 IndentCaseLabels: true
 IndentGotoLabels: false
+IndentRequires: true
 IndentPPDirectives: AfterHash
 IndentWrappedFunctionNames: false
 KeepEmptyLinesAtTheStartOfBlocks: false
 MaxEmptyLinesToKeep: 1
-NamespaceIndentation: All
+NamespaceIndentation: None
 PointerAlignment: Left
 ReflowComments: true
-SortIncludes: true
+SortIncludes: false
 SortUsingDeclarations: true
 SpaceAfterCStyleCast: false
 SpaceAfterLogicalNot: false
