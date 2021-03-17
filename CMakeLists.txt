@@ -21,3 +21,6 @@ target_compile_features(AsyncMPI INTERFACE cxx_std_20)
 
 add_executable(recv examples/recv.cpp) 
 target_link_libraries(recv PRIVATE AsyncMPI)
+
+add_executable(bulk_finally examples/bulk_finally.cpp) 
+target_link_libraries(bulk_finally PRIVATE AsyncMPI)

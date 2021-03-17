@@ -1,9 +1,11 @@
 #pragma once
 
 #include <unifex/get_allocator.hpp>
-#include <unifex/get_scheduler.hpp>
 #include <unifex/receiver_concepts.hpp>
 #include <unifex/sender_concepts.hpp>
+#include <unifex/scheduler_concepts.hpp>
+
+#include <unifex/detail/atomic_intrusive_queue.hpp>
 
 namespace ampi {
 // Define the function object in its own namespace to prevent name clashes of
@@ -15,13 +17,21 @@ using operation_t = decltype(unifex::connect(std::declval<Sender&&>(), std::decl
 template <typename Allocator, typename T>
 using rebind_alloc_t = typename std::allocator_traits<Allocator>::template rebind_alloc<T>;
 
+template <typename T, typename Allocator>
+auto rebind_alloc(const Allocator& alloc) {
+  return rebind_alloc_t<Allocator, T>(alloc);
+}
+
+template <typename Receiver>
+using get_scheduler_t = decltype(unifex::get_scheduler(std::declval<Receiver&>()));
+
 // Provide space for an operation state for each incoming sender of the
 // source many sender.
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
 struct operation_state {
-  struct operation_state_child_base {
-    virtual ~operation_state_child_base() = default;
-    operation_state_child* next;
+  struct operation_base {
+    virtual ~operation_base() = default;
+    operation_base* next;
   };
 
   // This class receives next values from a ManySender source.
@@ -52,7 +62,7 @@ struct operation_state {
 
   // Storage for each operation state of a continuation.
   // This will be dequeued and deallocated by the last active operation.
-  atomic_intrusive_queue<operation_state_child_base*, &operation_state_child_base::next>
+  unifex::atomic_intrusive_queue<operation_base, &operation_base::next>
       operation_states_of_children{};
 
   /// \brief Returns the allocator that is associated with the ManyReceiver of this operation.
@@ -65,7 +75,7 @@ struct operation_state {
   /// \brief Returns the scheduler that is associated with the ManyReceiver of this operation.
   ///
   /// This scheduler is used to queue up the continuations.
-  unifex::get_scheduler_t<ManyReceiver> get_scheduler() const noexcept {
+  get_scheduler_t<ManyReceiver> get_scheduler() const noexcept {
     return unifex::get_scheduler(many_receiver);
   }
 
@@ -73,26 +83,7 @@ struct operation_state {
   // continuation. This function also stores the operation state into the
   // op state queue of the main operation state.
   template <typename C>
-  void enqueue_continuation(C&& continuation) noexcept {
-    using Continuation = std::remove_cvref_t<C>;
-    // Type erasure for the newly enqueued operation state.
-    struct operation_state_child : operation_state_child_base {
-      operation_state_child(Continuation&& s, single_sender_to_many_receiver&& r) noexcept
-        : operation_state_child_base{nullptr}
-        , operation_state{unifex::connect(std::move(s), std::move(r))} {}
-      operation_state_t<Continuation, single_sender_to_many_receiver> operation_state;
-      void start() & noexcept { operation_state.start(); }
-    };
-    using ChildAllocator =
-        rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation_state_child>;
-    ChildAllocator child_allocator = rebind_alloc<operation_state_child>(op->get_allocator());
-    auto new_child = std::allocator_traits<ChildAllocator>::allocate(child_allocator, 1);
-    n_operation_states.fetch_add(1);
-    std::allocator_traits<ChildAllocator>::construct(
-        child_allocator, new_child, std::move(sender), single_sender_to_many_receiver{parent_op});
-    op->operation_states_of_children.enqueue(new_child);
-    new_child->start();
-  }
+  void enqueue_continuation(C&& continuation) noexcept;
 
   // Decrease operation state count. If the count hits zero after our operation we deallocate all
   // operation states using the allocator that is stored in the original many receiver.
@@ -100,8 +91,8 @@ struct operation_state {
     std::size_t count = n_operation_states.fetch_sub(1);
     if (count == 1) {
       using ChildBaseAllocator =
-          rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation_state_child_base>;
-      ChildBaseAllocator allocator = rebind_alloc<operation_state_child_base>(op->get_allocator());
+          rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation_base>;
+      ChildBaseAllocator allocator = rebind_alloc<operation_base>(get_allocator());
       auto queue = operation_states_of_children.dequeue_all();
       while (!queue.empty()) {
         auto pointer = queue.pop_front();
@@ -181,9 +172,35 @@ struct operation_state<SourceManySender, SenderFactory, ManyReceiver>::
   }
 };
 
+template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
+template <typename C>
+void operation_state<SourceManySender, SenderFactory, ManyReceiver>::enqueue_continuation(
+    C&& continuation) noexcept {
+  using Continuation = std::remove_cvref_t<C>;
+  // Type erasure for the newly enqueued operation state.
+  struct operation : operation_base {
+    operation(Continuation&& s, single_sender_to_many_receiver&& r) noexcept
+      : operation_base{nullptr}
+      , operation_state{unifex::connect(std::move(s), std::move(r))} {}
+    operation_t<Continuation, single_sender_to_many_receiver> operation_state;
+    void start() & noexcept { operation_state.start(); }
+  };
+  using ChildAllocator = rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation>;
+  ChildAllocator child_allocator = rebind_alloc<operation>(get_allocator());
+  auto new_child = std::allocator_traits<ChildAllocator>::allocate(child_allocator, 1);
+  n_operation_states.fetch_add(1);
+  std::allocator_traits<ChildAllocator>::construct(
+      child_allocator,
+      new_child,
+      std::move(continuation),
+      single_sender_to_many_receiver{std::addressof(*parent_operation)});
+  operation_states_of_children.enqueue(new_child);
+  new_child->start();
+}
+
 // A convenient typedef to strip cv qualifiers
 template <typename Source, typename Completion, typename ManyReceiver>
-using operation = typename operation_state<
+using operation = operation_state<
     std::remove_cvref_t<Source>,
     std::remove_cvref_t<Completion>,
     std::remove_cvref_t<ManyReceiver>>;
@@ -194,8 +211,8 @@ struct many_sender {
   [[no_unique_address]] SenderFactory factory;
 
   template <typename ManyReceiver>
-    requires unifex::receiver_to<ManyReceiver>
-  auto connect(Receiver&& receiver) && noexcept {
+    requires unifex::receiver_of<ManyReceiver>
+  auto connect(ManyReceiver&& receiver) && noexcept {
     return operation<SourceManySender, SenderFactory, ManyReceiver>{
         std::move(source), std::move(factory), std::move(receiver)};
   }
