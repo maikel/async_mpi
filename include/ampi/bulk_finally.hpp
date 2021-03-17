@@ -22,19 +22,14 @@ auto rebind_alloc(const Allocator& alloc) {
   return rebind_alloc_t<Allocator, T>(alloc);
 }
 
-template <typename Receiver>
-using get_scheduler_t = decltype(unifex::get_scheduler(std::declval<Receiver&>()));
+// template <typename Receiver>
+// using get_scheduler_t = decltype(unifex::get_scheduler(std::declval<Receiver>()));
 
 // Provide space for an operation state for each incoming sender of the
 // source many sender.
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
-struct operation_state {
-  struct operation_base {
-    operation_base() = default;
-    virtual ~operation_base() = default;
-    operation_base* next{};
-  };
-
+class operation_state {
+public:
   // This class receives next values from a ManySender source.
   // For each value we create new single senders using the SenderFactory.
   // Each result of the newly created senders will be forwarded to the
@@ -47,25 +42,33 @@ struct operation_state {
   // TODO: If set_error or set_done is called by a single sender this class calls std::terminate.
   struct single_sender_to_many_receiver;
 
+  operation_state(SourceManySender&& source, SenderFactory&& f, ManyReceiver&& r);
+
+  void start() & noexcept;
+
+private:
   [[no_unique_address]] SenderFactory factory;
   [[no_unique_address]] ManyReceiver many_receiver;
 
   // We store the operation state of the parent in an optional which does not require a heap
   // allocation.
-  unifex::connect_result_t<SourceManySender, many_receiver_to_single_sender> parent_operation;
-
-  operation_state(SourceManySender&& source, SenderFactory&& f, ManyReceiver&& r);
+  unifex::connect_result_t<SourceManySender, many_receiver_to_single_sender> inner_operation;
 
   // This counts all active operations and will be increased by every created operation state, the
   // parent and all its continuations. It will also be decreased upon destruction of an operation
   // state. The operation that decreases this back to 0 is responsible for deallocating all
   // allocated operation states.
-  std::atomic<std::size_t> n_operation_states{0};
+  std::atomic<std::size_t> n_active_operations{0};
+
+  struct operation_base {
+    operation_base() = default;
+    virtual ~operation_base() = default;
+    operation_base* next{};
+  };
 
   // Storage for each operation state of a continuation.
   // This will be dequeued and deallocated by the last active operation.
-  unifex::atomic_intrusive_queue<operation_base, &operation_base::next>
-      operation_states_of_children{};
+  unifex::atomic_intrusive_queue<operation_base, &operation_base::next> continuations{};
 
   /// \brief Returns the allocator that is associated with the ManyReceiver of this operation.
   ///
@@ -77,7 +80,8 @@ struct operation_state {
   /// \brief Returns the scheduler that is associated with the ManyReceiver of this operation.
   ///
   /// This scheduler is used to queue up the continuations.
-  get_scheduler_t<ManyReceiver> get_scheduler() const noexcept {
+  auto get_scheduler() const noexcept requires
+      unifex::is_callable_v<decltype(unifex::get_scheduler), const ManyReceiver&> {
     return unifex::get_scheduler(many_receiver);
   }
 
@@ -87,28 +91,11 @@ struct operation_state {
   template <typename C>
   void enqueue_continuation(C&& continuation) noexcept;
 
+  void finalize() noexcept;
+
   // Decrease operation state count. If the count hits zero after our operation we deallocate all
   // operation states using the allocator that is stored in the original many receiver.
-  void decrease_operation_count_and_deallocate_all_children_if_last() noexcept {
-    std::size_t count = n_operation_states.fetch_sub(1);
-    if (count == 1) {
-      using ChildBaseAllocator =
-          rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation_base>;
-      ChildBaseAllocator allocator = rebind_alloc<operation_base>(get_allocator());
-      auto queue = operation_states_of_children.dequeue_all();
-      while (!queue.empty()) {
-        auto pointer = queue.pop_front();
-        std::allocator_traits<ChildBaseAllocator>::destroy(allocator, pointer);
-        std::allocator_traits<ChildBaseAllocator>::deallocate(allocator, pointer, 1);
-      }
-      unifex::set_value(std::move(many_receiver));
-    }
-  }
-
-  void start() & noexcept {
-    n_operation_states = 1;
-    parent_operation.start();
-  }
+  void decrease_operation_count_and_finalize_if_last() noexcept;
 };
 
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
@@ -119,7 +106,7 @@ struct operation_state<SourceManySender, SenderFactory, ManyReceiver>::
   template <typename... Args>
   void set_value(Args&&... args) && noexcept {
     unifex::set_next(op->many_receiver, std::forward<Args>(args)...);
-    op->decrease_operation_count_and_deallocate_all_children_if_last();
+    op->decrease_operation_count_and_finalize_if_last();
   }
 
   template <typename Error>
@@ -130,10 +117,6 @@ struct operation_state<SourceManySender, SenderFactory, ManyReceiver>::
   [[noreturn]] void set_done() && noexcept { std::terminate(); }
 };
 
-// This class receives next values from a ManySender source.
-// For each value we create new single senders using the SenderFactory.
-// Each result of the newly created senders will be forwarded to the
-// ManyReceiver.
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
 struct operation_state<SourceManySender, SenderFactory, ManyReceiver>::
     many_receiver_to_single_sender {
@@ -142,12 +125,12 @@ struct operation_state<SourceManySender, SenderFactory, ManyReceiver>::
   // For each value that we recieve through set_next we spawn one or more
   // operation states.
   template <typename... Args>
-    requires(
-        std::is_invocable_v<SenderFactory, Args...> &&
-        (std::is_void_v<std::invoke_result_t<SenderFactory, Args...>> ||
-         unifex::sender_to<
-             std::invoke_result_t<SenderFactory, Args...>,
-             single_sender_to_many_receiver>))
+  // requires(
+  //     std::is_invocable_v<SenderFactory, Args...> &&
+  //     (std::is_void_v<std::invoke_result_t<SenderFactory, Args...>> ||
+  //      unifex::sender_to<
+  //          std::invoke_result_t<SenderFactory, Args...>,
+  //          single_sender_to_many_receiver>))
   void set_next(Args&&... args) const noexcept {
     if constexpr (!std::is_void_v<std::invoke_result_t<SenderFactory, Args...>>) {
       assert(op);
@@ -157,19 +140,17 @@ struct operation_state<SourceManySender, SenderFactory, ManyReceiver>::
     }
   }
 
-  void set_value() && noexcept {
-    op->decrease_operation_count_and_deallocate_all_children_if_last();
-  }
+  void set_value() && noexcept { op->decrease_operation_count_and_finalize_if_last(); }
 
   [[noreturn]] void set_done() && noexcept {
     std::terminate();
-    // op->decrease_operation_count_and_deallocate_all_children_if_last();
+    // op->decrease_operation_count_and_finalize_if_last();
   }
 
   template <typename Error>
   [[noreturn]] void set_error(Error&&) && noexcept {
     std::terminate();
-    // op->decrease_operation_count_and_deallocate_all_children_if_last();
+    // op->decrease_operation_count_and_finalize_if_last();
   }
 };
 
@@ -189,11 +170,41 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::enqueue_con
   using ChildAllocator = rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation>;
   ChildAllocator child_allocator = rebind_alloc<operation>(get_allocator());
   auto new_child = std::allocator_traits<ChildAllocator>::allocate(child_allocator, 1);
-  n_operation_states.fetch_add(1);
+  n_active_operations.fetch_add(1);
   std::allocator_traits<ChildAllocator>::construct(
       child_allocator, new_child, std::move(continuation), single_sender_to_many_receiver{this});
-  [[maybe_unused]] auto ignore_inactive = operation_states_of_children.enqueue(new_child);
+  [[maybe_unused]] auto ignore_inactive = continuations.enqueue(new_child);
   new_child->start();
+}
+
+template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
+void operation_state<SourceManySender, SenderFactory, ManyReceiver>::finalize() noexcept {
+  using ChildBaseAllocator = rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation_base>;
+  ChildBaseAllocator allocator = rebind_alloc<operation_base>(get_allocator());
+  auto queue = continuations.dequeue_all();
+  while (!queue.empty()) {
+    auto pointer = queue.pop_front();
+    std::allocator_traits<ChildBaseAllocator>::destroy(allocator, pointer);
+    std::allocator_traits<ChildBaseAllocator>::deallocate(allocator, pointer, 1);
+  }
+  unifex::set_value(std::move(many_receiver));
+}
+
+// Decrease operation state count. If the count hits zero after our operation we deallocate all
+// operation states using the allocator that is stored in the original many receiver.
+template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
+void operation_state<SourceManySender, SenderFactory, ManyReceiver>::
+    decrease_operation_count_and_finalize_if_last() noexcept {
+  std::size_t count = n_active_operations.fetch_sub(1);
+  if (count == 1) {
+    finalize();
+  }
+}
+
+template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
+void operation_state<SourceManySender, SenderFactory, ManyReceiver>::start() & noexcept {
+  n_active_operations = 1;
+  inner_operation.start();
 }
 
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
@@ -201,7 +212,7 @@ operation_state<SourceManySender, SenderFactory, ManyReceiver>::operation_state(
     SourceManySender&& source, SenderFactory&& f, ManyReceiver&& r)
   : factory(std::move(f))
   , many_receiver(std::move(r))
-  , parent_operation(
+  , inner_operation(
         unifex::connect((SourceManySender &&) source, many_receiver_to_single_sender{this})) {
 }
 
