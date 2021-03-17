@@ -1,8 +1,6 @@
-#include "ampi/mpi_abort_on_error.hpp"
-#include "ampi/tbb_task_group_context.hpp"
-#include "ampi/for_each.hpp"
-
-#include <tbb/task_arena.h>
+#include <ampi/mpi_abort_on_error.hpp>
+#include <ampi/tbb_task_scheduler.hpp>
+#include <ampi/for_each.hpp>
 
 #include <mpi.h>
 

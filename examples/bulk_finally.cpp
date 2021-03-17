@@ -1,7 +1,7 @@
 #include <ampi/bulk_finally.hpp>
 
 #include <ampi/mpi_abort_on_error.hpp>
-#include <ampi/tbb_task_group_context.hpp>
+#include <ampi/tbb_task_scheduler.hpp>
 #include <ampi/for_each.hpp>
 
 #include <mpi.h>
