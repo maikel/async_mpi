@@ -26,9 +26,10 @@ auto async_do_something(std::vector<MPI_Request> pending_requests, MPI_Comm, com
 }
 ```
 
-It's intent is to try out a structural parallel programming model in classical HPC applications such as finite volume flow solver on structured grids.
+It's intent is to try out a structural parallel programming model in classical HPC applications such as a finite volume flow solver on structured grids.
 
-The examples will include a test that uses this programming model in conjunction with the [AMReX](https://github.com/AMReX-Codes/amrex) framework which is used to distribute an adaptively mesh refined grid. 
-AMReX's usual strategy to CPU parallelization involves using OpenMP blocks that are mostly separate from the MPI communication procedures that exchange dependend data across compute nodes.
+The examples will include a test that uses this programming model in conjunction with the [AMReX](https://github.com/AMReX-Codes/amrex) framework which is used to distribute a multi dimensional grid to multiple compute nodes of a cluster, which uses MPI under the hood. 
 
-The functions in this library enable another parallel programming models beside the OpenMP model.
+AMReX's usual strategy to CPU parallelization involves using parallel OpenMP blocks that are mostly separate from the MPI communication procedures.
+
+The functions in this library enable other parallel programming models beside the OpenMP model, which are based on tasks.
