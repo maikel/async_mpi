@@ -183,6 +183,7 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::enqueue_con
     std::allocator_traits<OpAllocator>::construct(
         allocator, cont_op, std::move(continuation), ForwardResultToManyReceiver{this});
     bool is_inactive = continuations.enqueue(cont_op);
+    cont_op->start();
     // This cannot happen, due to the count variable ?
     if (is_inactive) {
       std::terminate();
