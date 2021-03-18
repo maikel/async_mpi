@@ -4,21 +4,26 @@
 #include <unifex/sender_concepts.hpp>
 
 #include <tbb/task_arena.h>
+#include <cassert>
 
 namespace ampi {
 namespace tbb_task_scheduler_ns {
-template <typename R>
-struct operation;
 
 struct sender;
-struct tbb_task_scheduler {
-  tbb::task_arena* arena_;
-
+class tbb_task_scheduler {
+public:
   tbb_task_scheduler(tbb::task_arena& arena) : arena_{&arena} {}
 
   sender schedule() const noexcept;
 
   friend auto operator<=>(const tbb_task_scheduler&, const tbb_task_scheduler&) = default;
+
+  tbb::task_arena& arena() noexcept {
+    return *arena_;
+  }
+
+private:
+  tbb::task_arena* arena_;
 };
 
 template <typename Receiver>
@@ -30,6 +35,7 @@ struct operation {
 
   void start() & noexcept {
     try {
+      assert(arena_);
       arena_->enqueue([&] { unifex::set_value(std::move(receiver_)); });
     } catch (...) {
       unifex::set_error(std::move(receiver_), std::current_exception());
@@ -50,6 +56,7 @@ struct sender {
 
   template <typename R>
   auto connect(R&& receiver) const& noexcept {
+    assert(arena_);
     return operation<std::remove_cvref_t<R>>{std::move(receiver), arena_};
   }
 };
