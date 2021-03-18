@@ -3,15 +3,12 @@
 #include <unifex/scheduler_concepts.hpp>
 #include <unifex/sender_concepts.hpp>
 
-#include <tbb/parallel_invoke.h>
 #include <tbb/task_arena.h>
 
 namespace ampi {
 namespace tbb_task_scheduler_ns {
 template <typename R>
 struct operation;
-template <typename R>
-using op = operation<std::remove_cvref_t<R>>;
 
 struct sender;
 struct tbb_task_scheduler {
@@ -52,7 +49,7 @@ struct sender {
   template <template <typename...> class Variant>
   using error_types = Variant<std::exception_ptr>;
 
-  static constexpr bool sends_done = true;
+  static constexpr bool sends_done = false;
 
   template <typename R>
   auto connect(R&& receiver) const& noexcept {

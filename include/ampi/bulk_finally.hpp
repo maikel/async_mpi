@@ -167,14 +167,19 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::enqueue_con
     operation_t<Continuation, single_sender_to_many_receiver> op;
     void start() & noexcept { op.start(); }
   };
-  using ChildAllocator = rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation>;
-  ChildAllocator child_allocator = rebind_alloc<operation>(get_allocator());
-  auto new_child = std::allocator_traits<ChildAllocator>::allocate(child_allocator, 1);
-  n_active_operations.fetch_add(1);
-  std::allocator_traits<ChildAllocator>::construct(
-      child_allocator, new_child, std::move(continuation), single_sender_to_many_receiver{this});
-  [[maybe_unused]] auto ignore_inactive = continuations.enqueue(new_child);
-  new_child->start();
+  using OpAllocator = rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation>;
+  OpAllocator allocator = rebind_alloc<operation>(get_allocator());
+  auto cont_op = std::allocator_traits<OpAllocator>::allocate(allocator, 1);
+  std::size_t old_count = n_active_operations.fetch_add(1);
+  // This happens if set_next is called after a final set_value have been called.
+  if (old_count == 0) {
+    std::allocator_traits<OpAllocator>::deallocate(allocator, cont_op, 1);
+    return;
+  }
+  std::allocator_traits<OpAllocator>::construct(
+      allocator, cont_op, std::move(continuation), single_sender_to_many_receiver{this});
+  [[maybe_unused]] auto ignore_inactive = continuations.enqueue(cont_op);
+  cont_op->start();
 }
 
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
