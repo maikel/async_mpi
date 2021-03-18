@@ -7,9 +7,11 @@ Consider a blocking call to `MPI_WaitAll` as in:
 
 ```cpp
 // Block the current thread until all pending requests are done
-void WaitAll(std::vector<MPI_Request>& pending_requests, int tag) {
+template <typename F>
+void WaitAll_and_do_something(std::vector<MPI_Request>& pending_requests, MPI_Comm comm, int tag) {
   int n_reqs = static_cast<int>(pending_requests.size());
-  MPI_WaitAll(n_reqs, pending_requests.data(), tag, MPI_IGNORE_STATUSES);
+  MPI_WaitAll(comm, n_reqs, pending_requests.data(), tag, MPI_IGNORE_STATUSES);
+  do_something();
 }
 ```
 
@@ -17,18 +19,16 @@ This library provides thin wrappers around those MPI calls and enables the usage
 
 The above example could read instead
 ```cpp
-// Returns a ManySender wait-all type that will lazily start on an user-defined executor thread.
-// If started, this will blockingly send a request index for each request that finished execution.
-// Dot *not* use this on an executor that is intended for doing computations, 
-// such as Intel TBB thread scheduler.
-auto WaitAll(std::vector<MPI_Request> pending_request, int tag) {
-  return ampi::wait_all(std::move(pending_requset), tag);
+// Returns a ManySender type that will lazily start on an user-defined executor thread.
+auto async_do_something(std::vector<MPI_Request> pending_requests, MPI_Comm, comm int tag) {
+  return ampi::for_each(std::move(pending_requests), comm, tag) 
+         | unifex::bulk_transform([](int index) { do_something(index); });
 }
 ```
 
 It's intent is to try out a structural parallel programming model in classical HPC applications such as finite volume flow solver on structured grids.
 
-The examples include a test that uses this programming model in conjunction with the [AMReX](https://github.com/AMReX-Codes/amrex) framework which is used to distribute an adaptively mesh refined grid. 
+The examples will include a test that uses this programming model in conjunction with the [AMReX](https://github.com/AMReX-Codes/amrex) framework which is used to distribute an adaptively mesh refined grid. 
 AMReX's usual strategy to CPU parallelization involves using OpenMP blocks that are mostly separate from the MPI communication procedures that exchange dependend data across compute nodes.
 
 The functions in this library enable another parallel programming models beside the OpenMP model.
