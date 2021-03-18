@@ -43,9 +43,6 @@ struct sender {
   template <template <typename...> class Variant, template <typename...> class Tuple>
   using value_types = Variant<Tuple<>>;
 
-  template <template <typename...> class Variant, template <typename...> class Tuple>
-  using next_types = Variant<Tuple<>>;
-
   template <template <typename...> class Variant>
   using error_types = Variant<std::exception_ptr>;
 
