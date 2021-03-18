@@ -134,9 +134,17 @@ struct operation_state<SourceManySender, SenderFactory, ManyReceiver>::EnqueueCo
   void set_next(Args&&... args) const noexcept {
     if constexpr (!std::is_void_v<std::invoke_result_t<SenderFactory, Args...>>) {
       assert(op);
+      // auto enqueue_continuations = [op = this->op,
+      //                               new_senders = std::tuple{std::invoke(
+      //                                   op->factory, std::forward<Args>(args)...)}]() mutable {
+      //   std::apply(
+      //       [&](auto&&... senders) { (op->enqueue_continuation(std::move(senders)), ...); },
+      //       std::move(new_senders));
+      // };
+      // unifex::execute(unifex::schedule(op->get_scheduler()), std::move(enqueue_continuations));
       std::apply(
-          [&](auto&&... senders) { (op->enqueue_continuation(std::move(senders)), ...); },
-          std::tuple{std::invoke(op->factory, std::forward<Args>(args)...)});
+            [&](auto&&... senders) { (op->enqueue_continuation(std::move(senders)), ...); },
+            std::tuple{std::invoke(op->factory, std::forward<Args>(args)...)});
     }
   }
 
@@ -173,7 +181,8 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::enqueue_con
   // check if the queue will deplete as we currently arrive
   std::size_t old_count = n_active_operations.load(std::memory_order_relaxed);
   std::size_t new_count = old_count + 1;
-  while (!n_active_operations.compare_exchange_weak(old_count, new_count)) {
+  while (!n_active_operations.compare_exchange_weak(
+      old_count, new_count, std::memory_order_release, std::memory_order_relaxed)) {
     if (old_count == 0) {
       break;
     }
@@ -183,11 +192,11 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::enqueue_con
     std::allocator_traits<OpAllocator>::construct(
         allocator, cont_op, std::move(continuation), ForwardResultToManyReceiver{this});
     bool is_inactive = continuations.enqueue(cont_op);
-    cont_op->start();
     // This cannot happen, due to the count variable ?
     if (is_inactive) {
       std::terminate();
     }
+    cont_op->start();
   }
 }
 
@@ -209,7 +218,7 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::finalize() 
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
 void operation_state<SourceManySender, SenderFactory, ManyReceiver>::
     decrease_operation_count_and_finalize_if_last() noexcept {
-  std::size_t count = n_active_operations.fetch_sub(1);
+  std::size_t count = n_active_operations.fetch_sub(1, std::memory_order_release);
   if (count == 1) {
     finalize();
   }
