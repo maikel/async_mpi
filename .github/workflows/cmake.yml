@@ -80,7 +80,7 @@ jobs:
         git clone https://github.com/maikel/libunifex.git
         cd libunifex
         mkdir build && cd build
-        cmake ../ -DBUILD_TESTING="OFF" -DUNIFEX_BUILD_EXAMPLES="OFF" -DCMAKE_BUILD_TYPE="Release" -DCMAKE_INSTALL_PREFIX="${{ env.HOME }}/unifex" -DCMAKE_CXX_COMPILER="${{ matrix.config.cxx }}"
+        cmake ../ -DBUILD_TESTING="OFF" -DUNIFEX_BUILD_EXAMPLES="OFF" -DCMAKE_BUILD_TYPE="Release" -DCMAKE_INSTALL_PREFIX="$HOME/unifex" -DCMAKE_CXX_COMPILER="${{ matrix.config.cxx }}"
         cmake --build . --config Release --target install
 
     - name: Create Build Environment
