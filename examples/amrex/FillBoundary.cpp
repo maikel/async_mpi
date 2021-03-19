@@ -20,6 +20,7 @@ using namespace unifex;
 using namespace ampi;
 
 inline constexpr auto then = bulk_transform;
+inline constexpr auto when_all = bulk_join;
 
 void my_main(MPI_Comm comm) {
   using namespace amrex;
@@ -53,7 +54,7 @@ void my_main(MPI_Comm comm) {
         LoopConcurrentOnCpu(box, [](int i, int j, int k) { AMREX_ASSERT(array(i, j, k) == 1.0); });
       });
   // Wait for everything being done.
-  sync_wait(when_all(async_test_for_unity));
+  sync_wait(when_all(std::move(async_test_for_unity)));
 }
 
 int main(int argc, char** argv) {
