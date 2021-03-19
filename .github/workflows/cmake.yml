@@ -1,4 +1,4 @@
-name: ampi-CI
+name: Linux GCC and clang
 
 on: [push, pull_request]
 
