@@ -9,26 +9,21 @@
 #include <mpi.h>
 
 namespace ampi {
-namespace _for_each {
+namespace for_each_ns {
 template <typename R>
 struct operation {
-  struct type;
-};
-
-template <typename R>
-struct operation<R>::type {
 public:
-  type(R&& receiver, MPI_Comm comm, std::vector<MPI_Request>&& requests, int tag)
+  operation(R&& receiver, MPI_Comm comm, std::vector<MPI_Request>&& requests, int tag)
     : receiver_{std::move(receiver)}
     , comm_{comm}
     , requests_{std::move(requests)}
     , tag_{tag} {}
 
-  type(const type&) = delete;
-  type& operator=(const type&) = delete;
+  operation(const operation&) = delete;
+  operation& operator=(const operation&) = delete;
 
-  type(type&&) = delete;
-  type& operator=(type&&) = delete;
+  operation(operation&&) = delete;
+  operation& operator=(operation&&) = delete;
 
   void start() & noexcept {
     const int size = static_cast<int>(requests_.size());
@@ -53,9 +48,6 @@ private:
   int tag_;
 };
 
-template <typename R>
-using op = operation<std::remove_cvref_t<R>>::type;
-
 class sender {
 public:
   template <template <typename...> class Variant, template <typename...> class Tuple>
@@ -74,28 +66,30 @@ public:
     , requests_(std::move(reqs))
     , tag_{tag} {}
 
+  template <typename Receiver>
+  auto connect(Receiver&& receiver) && noexcept {
+    return operation<std::remove_cvref_t<Receiver>>(
+        std::forward<Receiver>(receiver), comm_, std::move(requests_), tag_);
+  }
+
+  constexpr std::integral_constant<unifex::blocking_kind, unifex::blocking_kind::always_inline>
+  blocking() const noexcept {
+    return {};
+  }
+
 private:
   MPI_Comm comm_;
   std::vector<MPI_Request> requests_;
   int tag_;
-
-  template <typename R>
-  friend auto tag_invoke(unifex::tag_t<unifex::connect>, sender sender, R&& recv) noexcept {
-    return op<R>(
-        std::move(recv),
-        std::move(sender).comm_,
-        std::move(sender).requests_,
-        std::move(sender).tag_);
-  }
 };
 
 inline constexpr struct fn {
-  auto operator()(MPI_Comm comm, std::vector<MPI_Request> requests, int tag) const noexcept {
+  auto operator()(std::vector<MPI_Request> requests, MPI_Comm comm, int tag) const noexcept {
     return sender(comm, std::move(requests), tag);
   }
 } for_each{};
 
-}  // namespace _for_each
+}  // namespace for_each_ns
 
-using _for_each::for_each;
+using for_each_ns::for_each;
 }  // namespace ampi
