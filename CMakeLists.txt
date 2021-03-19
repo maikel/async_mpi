@@ -11,16 +11,19 @@ find_package(unifex REQUIRED)
 add_library(AsyncMPI INTERFACE)
 target_sources(AsyncMPI 
   INTERFACE 
+    include/ampi/bulk_sequence.hpp
     include/ampi/bulk_finally.hpp
     include/ampi/for_each.hpp
     include/ampi/mpi_abort_on_error.hpp
     include/ampi/tbb_task_scheduler.hpp)
-target_include_directories(AsyncMPI INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include/)
+
+target_include_directories(AsyncMPI INTERFACE 
+                          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/>
+                          $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/include/>)
 target_link_libraries(AsyncMPI INTERFACE unifex::unifex MPI::MPI_C MPI::MPI_CXX TBB::tbb)
 target_compile_features(AsyncMPI INTERFACE cxx_std_20)
 
-add_executable(for_each examples/for_each.cpp) 
-target_link_libraries(for_each PRIVATE AsyncMPI)
-
-add_executable(bulk_finally examples/bulk_finally.cpp) 
-target_link_libraries(bulk_finally PRIVATE AsyncMPI)
+option(AMPI_WITH_EXAMPLES "Compile examples for AsyncMPI" ON)
+if (AMPI_WITH_EXAMPLES)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/examples)
+endif()

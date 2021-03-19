@@ -79,7 +79,7 @@ int main() {
 
     sync_wait(
         bulk_join(ampi::bulk_finally(
-            ampi::for_each(comm, std::move(requests), tag),
+            ampi::for_each(std::move(requests), comm, tag),
             [comm_rank, &intel_tbb](int index) {
               const std::size_t thread_id =
                   std::hash<std::thread::id>{}(std::this_thread::get_id());

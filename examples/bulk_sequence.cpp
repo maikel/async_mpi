@@ -1,22 +1,15 @@
-#include <ampi/mpi_abort_on_error.hpp>
-#include <ampi/tbb_task_scheduler.hpp>
+#include <ampi/bulk_sequence.hpp>
 #include <ampi/for_each.hpp>
+#include <ampi/bulk_on.hpp>
 
-#include <mpi.h>
-
+#include <unifex/single_thread_context.hpp>
 #include <unifex/bulk_join.hpp>
 #include <unifex/bulk_transform.hpp>
-#include <unifex/just.hpp>
-#include <unifex/on.hpp>
-#include <unifex/scope_guard.hpp>
-#include <unifex/single_thread_context.hpp>
-#include <unifex/static_thread_pool.hpp>
 #include <unifex/sync_wait.hpp>
-#include <unifex/transform.hpp>
 
 #include <ranges>
-#include <span>
-#include <vector>
+
+#include <mpi.h>
 
 #define AMPI_CALL_MPI(fun)                                          \
   if (int errc = (fun); errc != MPI_SUCCESS) {                      \
@@ -24,12 +17,23 @@
     std::terminate();                                               \
   }
 
+using namespace unifex;
+using namespace ampi;
+
+void print_received(int index, int rank) {
+  const std::size_t thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+  std::printf("%d-%zu: Received request at index %d.\n", rank, thread_id, index);
+}
+
 int main() {
   MPI_Init(nullptr, nullptr);
-  unifex::scope_guard scope_guard = []() noexcept {
+  scope_guard mpi_finalize = []() noexcept {
     MPI_Finalize();
   };
-  using namespace unifex;
+
+  single_thread_context ctx;
+  auto scheduler = ctx.get_scheduler();
+
   MPI_Comm comm = MPI_COMM_WORLD;
   int comm_size = -1;
   int comm_rank = -1;
@@ -59,42 +63,12 @@ int main() {
       std::printf("%d-%zu: Post Irecv values from %d ...\n", comm_rank, thread_id, from_rank);
       AMPI_CALL_MPI(MPI_Irecv(datas[i].data(), size, MPI_INT, from_rank, tag, comm, &requests[i]));
     }
+    auto sender = bulk_join(bulk_transform(
+        bulk_on(scheduler, for_each(requests, comm, tag)),
+        [comm_rank](int index) { print_received(index, comm_rank); },
+        par_unseq));
 
-    tbb::task_arena arena{};
-    ampi::tbb_task_scheduler intel_tbb{arena};
-
-    submit(
-        transform(
-            schedule(intel_tbb),
-            [comm_rank] {
-              const std::size_t thread_id =
-                  std::hash<std::thread::id>{}(std::this_thread::get_id());
-              std::printf("%d-%zu: Hello TBB #1.\n", comm_rank, thread_id);
-            }),
-        ampi::mpi_abort_on_error{comm});
-
-    single_thread_context communication_thread{};
-
-    sync_wait(on(
-        bulk_join(bulk_transform(
-            ampi::for_each(std::move(requests), comm, tag),
-            [comm_rank](int index) {
-              const std::size_t thread_id =
-                  std::hash<std::thread::id>{}(std::this_thread::get_id());
-              std::printf("%d-%zu: Recieved request at index %d.\n", comm_rank, thread_id, index);
-            },
-            par_unseq)),
-        communication_thread.get_scheduler()));
-
-    submit(
-        transform(
-            schedule(intel_tbb),
-            [comm_rank] {
-              const std::size_t thread_id =
-                  std::hash<std::thread::id>{}(std::this_thread::get_id());
-              std::printf("%d-%zu: Hello TBB #2.\n", comm_rank, thread_id);
-            }),
-        ampi::mpi_abort_on_error{comm});
+    sync_wait(std::move(sender));
   }
 
   AMPI_CALL_MPI(MPI_Wait(&send_request, MPI_STATUS_IGNORE));
