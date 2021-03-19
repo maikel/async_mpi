@@ -6,3 +6,7 @@ target_link_libraries(bulk_finally PRIVATE AsyncMPI)
 
 add_executable(bulk_sequence bulk_sequence.cpp) 
 target_link_libraries(bulk_sequence PRIVATE AsyncMPI)
+
+if (AMReX_FOUND)
+  add_subdirectory(amrex)
+endif()
