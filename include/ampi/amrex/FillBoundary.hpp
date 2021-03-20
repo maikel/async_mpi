@@ -90,11 +90,11 @@ void ReceiveLocalCopy<FAB, Receiver>::set_next(int i) const noexcept {
   FAB& dest = fa[tag.dstIndex];
   dest.template copy<RunOn::Host>(src, tag.sbox, op_->components.src_component, tag.dbox, op_->components.dest_component, op_->components.n_components);
 
-  const int local_index = fa.localindex(i);
+  const int local_index = fa.localindex(tag.dstIndex);
   const int old_box_count = op_->job_count_per_box_[local_index].fetch_sub(1, std::memory_order_acquire);
   // we are the last job for this box
   if (old_box_count == 1) {
-    unifex::set_next(op_->receiver_, i, dest.box());
+    unifex::set_next(op_->receiver_, tag.dstIndex, dest.box());
   }
   // we are the last job overall
   const int old_count = op_->total_job_count_.fetch_sub(1, std::memory_order_acquire);
