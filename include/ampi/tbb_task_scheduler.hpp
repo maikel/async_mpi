@@ -10,6 +10,7 @@ namespace ampi {
 namespace tbb_task_scheduler_ns {
 
 struct sender;
+struct many_sender;
 class tbb_task_scheduler {
 public:
   tbb_task_scheduler(tbb::task_arena& arena) : arena_{&arena} {}
@@ -24,6 +25,8 @@ public:
 
 private:
   tbb::task_arena* arena_;
+
+  friend many_sender tag_invoke(unifex::tag_t<unifex::bulk_schedule>, const tbb_task_scheduler& s, std::size_t n);
 };
 
 template <typename Receiver>
@@ -61,8 +64,62 @@ struct sender {
   }
 };
 
+template <typename Receiver> struct many_operation;
+template <typename Receiver> void parallel_enqueue_task(many_operation& op, int lo, int hi);
+
+template <typename Receiver>
+struct many_operation {
+  [[no_unique_address]] Receiver receiver_;
+  tbb::task_arena* arena_;
+  std::atomic<int> n_tasks_;
+
+  void start() & noexcept {
+    try {
+      const int n = n_tasks.load(std::memory_order::relaxed);
+      arena_->enqueue([this] { parallel_enqueue_task(*this, 0, n); });
+    } catch (...) {
+      unifex::set_error(std::move(receiver_), std::current_exception());
+    }
+  }
+};
+
+template <typename Receiver>
+void parallel_enqueue_task(many_operation<Receiver>& op, int lo, int hi) {
+  if (lo < hi) {
+    const int mid = (lo + hi) / 2;
+    unifex::set_next(op.receiver_, mid);
+    const int previous_value = op.n_tasks.fetch_sub(1, std::memory_order::acquire);
+    if (previous_value == 1) {
+      unifex::set_value(std::move(op.receiver_));
+    } else {
+      if (lo < mid) {
+        op.arena_.enqueue([&op, lo, mid] {  parallel_enqueue_task(op, lo, mid); });
+      } 
+      if (mid + 1 < hi) {
+        op.arena_.enqueue([&op, mid, hi] {  parallel_enqueue_task(op, mid + 1, hi); });
+      }
+    }
+  }
+}
+
+
+struct many_sender {
+  tbb::task_arena* arena_;
+  int n_tasks_;
+
+  template <typename Receiver>
+  many_operation<std::remove_cvref_t<Receiver>> connect(Receiver&& receiver) const noexcept {
+    return {std::move(receiver), arena_, n_tasks_};
+  }
+};
+
 inline sender tbb_task_scheduler::schedule() const noexcept {
   return sender{arena_};
+}
+
+inline many_sender tag_invoke(unifex::tag_t<unifex::bulk_schedule>, const tbb_task_scheduler& s, std::size_t n)
+{
+
 }
 
 static_assert(unifex::typed_sender<sender>);

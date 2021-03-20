@@ -36,7 +36,7 @@ struct CopyOperations {
   FabArray<FAB>* fa_;
   NonLocalBC::CommHandler handler_;
   const FabArrayBase::FB* meta_data_;
-  NonLocalBC::PackComponents components;
+  NonLocalBC::PackComponents components_;
   Receiver receiver_;
   std::vector<std::atomic<int>> job_count_per_box_{};
   std::atomic<int> total_job_count_{};
@@ -51,6 +51,7 @@ struct CopyOperations {
     : fa_(fa)
     , handler_(std::move(handler))
     , meta_data_(meta_data)
+    , components_{components}
     , job_count_per_box_(fa_->local_size())
     , receiver_(std::move(r)) {
     // count local jobs per box
@@ -70,10 +71,15 @@ struct CopyOperations {
     // MPI_Comm comm = ParallelDescriptor::Communicator();
     // ampi::for_each(std::move(handler_.recv.request), comm, handler_.mpi_tag);
 
-    auto scheduler = unifex::get_scheduler(receiver_);
-    auto local_copies_sender = unifex::bulk_schedule(scheduler, meta_data_->m_LocTags->size());
-    static_assert(unifex::same_as<std::remove_cvref_t<decltype(local_copies_sender)>, SendLocalCopy>);
-    local_copy_op_.emplace(unifex::connect(std::move(local_copies_sender), ReceiveLocalCopy<FAB, Receiver>{this}));
+    if (meta_data_->m_LocTags->size() > 0) {
+      auto scheduler = unifex::get_scheduler(receiver_);
+      auto local_copies_sender = unifex::bulk_schedule(scheduler, meta_data_->m_LocTags->size());
+      local_copy_op_.emplace(unifex::connect(std::move(local_copies_sender), ReceiveLocalCopy<FAB, Receiver>{this}));
+    }
+
+    if (meta_data_->m_LocTags->empty() && meta_data_->m_RcvTags->empty()) {
+      unifex::set_value(std::move(receiver_));
+    }
   }
 
   void start() & noexcept {
@@ -88,7 +94,7 @@ void ReceiveLocalCopy<FAB, Receiver>::set_next(int i) const noexcept {
   FabArray<FAB>& fa = *op_->fa_;
   const FAB& src = fa[tag.srcIndex];
   FAB& dest = fa[tag.dstIndex];
-  dest.template copy<RunOn::Host>(src, tag.sbox, op_->components.src_component, tag.dbox, op_->components.dest_component, op_->components.n_components);
+  dest.template copy<RunOn::Host>(src, tag.sbox, op_->components_.src_component, tag.dbox, op_->components_.dest_component, op_->components_.n_components);
 
   const int local_index = fa.localindex(tag.dstIndex);
   const int old_box_count = op_->job_count_per_box_[local_index].fetch_sub(1, std::memory_order_acquire);
