@@ -27,7 +27,7 @@ void my_main(MPI_Comm comm) {
   using namespace amrex;
   Box domain{IntVect(0), IntVect(63)};
   BoxArray ba{domain};
-  ba.maxSize(32);
+  ba.maxSize(8);
 
   DistributionMapping dm(ba);
 
@@ -68,7 +68,7 @@ void my_main(MPI_Comm comm) {
       FillBoundary_finish(mf, std::move(handler), cmd, components),
       [&mf](int index, const Box& box) {
         const std::size_t thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-        Print() << thread_id << '\n';
+        Print() << thread_id << ": mf[" << index << "] = " << box << '\n';
         Array4<const Real> array = mf.const_array(index);
         LoopConcurrentOnCpu(box, [=](int i, int j, int k) {
           AMREX_ASSERT(array(i, j, k) == 1.0); 
