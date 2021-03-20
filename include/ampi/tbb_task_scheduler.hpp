@@ -2,6 +2,7 @@
 
 #include <unifex/scheduler_concepts.hpp>
 #include <unifex/sender_concepts.hpp>
+#include <unifex/bulk_schedule.hpp>
 
 #include <tbb/task_arena.h>
 #include <cassert>
@@ -65,18 +66,33 @@ struct sender {
 };
 
 template <typename Receiver> struct many_operation;
-template <typename Receiver> void parallel_enqueue_task(many_operation& op, int lo, int hi);
+template <typename Receiver> void parallel_enqueue_task(many_operation<Receiver>& op, std::size_t lo, std::size_t hi);
 
 template <typename Receiver>
 struct many_operation {
   [[no_unique_address]] Receiver receiver_;
   tbb::task_arena* arena_;
-  std::atomic<int> n_tasks_;
+  std::atomic<std::size_t> n_tasks_;
+
+  many_operation(Receiver&& r, tbb::task_arena* arena, std::atomic<std::size_t> n)
+    : receiver_{std::move(r)}, arena_{arena}, n_tasks_{n.load(std::memory_order::relaxed)} {}
+  
+  many_operation(const many_operation&) = delete;
+  many_operation& operator=(const many_operation&) = delete;
+
+  many_operation(many_operation&& other) noexcept
+    : receiver_(std::move(other.receiver_)), arena_(other.arena_), n_tasks_(other.n_tasks_.load(std::memory_order::relaxed)) {}
+  many_operation& operator=(many_operation&& other) = delete;
+
+  ~many_operation() noexcept = default;
+
 
   void start() & noexcept {
     try {
-      const int n = n_tasks.load(std::memory_order::relaxed);
-      arena_->enqueue([this] { parallel_enqueue_task(*this, 0, n); });
+      arena_->enqueue([this] { 
+        const std::size_t n = n_tasks_.load(std::memory_order::relaxed);
+        parallel_enqueue_task(*this, 0, n); 
+      });
     } catch (...) {
       unifex::set_error(std::move(receiver_), std::current_exception());
     }
@@ -84,31 +100,41 @@ struct many_operation {
 };
 
 template <typename Receiver>
-void parallel_enqueue_task(many_operation<Receiver>& op, int lo, int hi) {
+void parallel_enqueue_task(many_operation<Receiver>& op, std::size_t lo, std::size_t hi) {
   if (lo < hi) {
-    const int mid = (lo + hi) / 2;
+    const std::size_t mid = (lo + hi) / 2;
     unifex::set_next(op.receiver_, mid);
-    const int previous_value = op.n_tasks.fetch_sub(1, std::memory_order::acquire);
+    const std::size_t previous_value = op.n_tasks_.fetch_sub(1, std::memory_order::acquire);
     if (previous_value == 1) {
       unifex::set_value(std::move(op.receiver_));
     } else {
       if (lo < mid) {
-        op.arena_.enqueue([&op, lo, mid] {  parallel_enqueue_task(op, lo, mid); });
+        op.arena_->enqueue([&op, lo, mid] {  parallel_enqueue_task(op, lo, mid); });
       } 
       if (mid + 1 < hi) {
-        op.arena_.enqueue([&op, mid, hi] {  parallel_enqueue_task(op, mid + 1, hi); });
+        op.arena_->enqueue([&op, mid, hi] {  parallel_enqueue_task(op, mid + 1, hi); });
       }
     }
   }
 }
 
-
 struct many_sender {
+  template <template <typename...> class Variant, template <typename...> class Tuple>
+  using value_types = Variant<Tuple<>>;
+
+  template <template <typename...> class Variant, template <typename...> class Tuple>
+  using next_types = Variant<Tuple<std::size_t>>;
+
+  template <template <typename...> class Variant>
+  using error_types = Variant<std::exception_ptr>;
+
+  static constexpr bool sends_done = false;
+
   tbb::task_arena* arena_;
-  int n_tasks_;
+  std::size_t n_tasks_;
 
   template <typename Receiver>
-  many_operation<std::remove_cvref_t<Receiver>> connect(Receiver&& receiver) const noexcept {
+  many_operation<std::remove_cvref_t<Receiver>> connect(Receiver&& receiver) && noexcept {
     return {std::move(receiver), arena_, n_tasks_};
   }
 };
@@ -119,7 +145,7 @@ inline sender tbb_task_scheduler::schedule() const noexcept {
 
 inline many_sender tag_invoke(unifex::tag_t<unifex::bulk_schedule>, const tbb_task_scheduler& s, std::size_t n)
 {
-
+  return many_sender{s.arena_, n};
 }
 
 static_assert(unifex::typed_sender<sender>);

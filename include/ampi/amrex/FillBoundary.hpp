@@ -74,6 +74,7 @@ struct CopyOperations {
     if (meta_data_->m_LocTags->size() > 0) {
       auto scheduler = unifex::get_scheduler(receiver_);
       auto local_copies_sender = unifex::bulk_schedule(scheduler, meta_data_->m_LocTags->size());
+      // local_copy_op_.emplace(unifex::connect(std::move(local_copies_sender), ReceiveLocalCopy<FAB, Receiver>{this}));
       local_copy_op_.emplace(unifex::connect(std::move(local_copies_sender), ReceiveLocalCopy<FAB, Receiver>{this}));
     }
 
