@@ -45,10 +45,10 @@ void my_main(MPI_Comm comm) {
   // }
 
   // Fill all domain boundaries periodically
-    RealBox real_box{{AMREX_D_DECL(-0.5, -0.5, -0.5)}, {AMREX_D_DECL(0.5, 0.5, 0.5)}};
+  RealBox real_box{{AMREX_D_DECL(-0.5, -0.5, -0.5)}, {AMREX_D_DECL(0.5, 0.5, 0.5)}};
 
-    Array<int, AMREX_SPACEDIM> is_periodic{AMREX_D_DECL(1, 1, 1)};
-    Geometry geom{domain, real_box, CoordSys::cartesian, is_periodic};
+  Array<int, AMREX_SPACEDIM> is_periodic{AMREX_D_DECL(1, 1, 1)};
+  Geometry geom{domain, real_box, CoordSys::cartesian, is_periodic};
 
   // Fill the first component
   NonLocalBC::PackComponents components{.dest_component = 0, .src_component = 0, .n_components = 1};
