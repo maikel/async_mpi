@@ -9,6 +9,25 @@
 #include <mpi.h>
 
 namespace ampi {
+namespace _get_comm_scheduler {
+  inline const struct _fn {
+    template <typename SchedulerProvider>
+        requires unifex::tag_invocable<_fn, const SchedulerProvider&>
+    auto operator()(const SchedulerProvider& context) const noexcept
+        -> unifex::tag_invoke_result_t<_fn, const SchedulerProvider&> {
+      static_assert(unifex::is_nothrow_tag_invocable_v<_fn, const SchedulerProvider&>);
+      static_assert(
+          unifex::scheduler<unifex::tag_invoke_result_t<_fn, const SchedulerProvider&>>);
+      return unifex::tag_invoke(*this, context);
+    }
+  } get_comm_scheduler{};
+} // namespace _get_comm_scheduler
+using _get_comm_scheduler::get_comm_scheduler;
+
+template <typename SchedulerProvider>
+using get_comm_scheduler_result_t =
+    decltype(get_scheduler(UNIFEX_DECLVAL(SchedulerProvider&&)));
+
 namespace for_each_ns {
 template <typename R>
 struct operation {
