@@ -59,6 +59,9 @@ void my_main(MPI_Comm comm) {
   tbb::task_arena arena{};
   tbb_task_scheduler oneTBB(arena);
 
+  single_thread_context comm_ctx;
+  auto comm_scheduler = comm_ctx.get_scheduler();
+
 
   const std::size_t thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
   Print() << thread_id << '\n';
@@ -75,7 +78,8 @@ void my_main(MPI_Comm comm) {
         });
       });
   // Wait for everything being done.
-  sync_wait(with_query_value(when_all(std::move(async_test_for_unity)), get_scheduler, oneTBB));
+
+  sync_wait(with_query_value(with_query_value(when_all(std::move(async_test_for_unity)), get_scheduler, oneTBB), get_comm_scheduler, comm_scheduler));
 }
 
 int main(int argc, char** argv) {
