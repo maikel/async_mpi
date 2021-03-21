@@ -32,7 +32,9 @@ struct ReceiveLocalCopy {
   void set_value() const noexcept {}
 
   template <typename Error>
-  [[noreturn]] void set_error(Error&&) const noexcept { std::terminate(); }
+  [[noreturn]] void set_error(Error&&) const noexcept {
+    std::terminate();
+  }
 
   [[noreturn]] void set_done() const noexcept { std::terminate(); }
 };
@@ -46,7 +48,9 @@ struct ReceiveRemoteCopy {
   void set_value() const noexcept {}
 
   template <typename Error>
-  [[noreturn]] void set_error(Error&&) const noexcept { std::terminate(); }
+  [[noreturn]] void set_error(Error&&) const noexcept {
+    std::terminate();
+  }
 
   [[noreturn]] void set_done() const noexcept { std::terminate(); }
 };
@@ -55,12 +59,40 @@ template <typename FAB, typename Receiver>
 struct UnpackReceives {
   CopyOperations<FAB, Receiver>* op_;
 
-  void operator()(int index) {
-    const Vector<char*>& recv_data = op_->handler_.recv.data[index];
-    const Vector<FabArrayBase::CopyComTagsContainer const*>& cctc = op_->handler_.recv.cctc[index];
+  auto operator()(int index) const noexcept {
     auto scheduler = unifex::get_scheduler(op_->receiver_);
-    const std::size_t n_recvs = recv_data.size();
-    auto do_all_copies_for_this_recv = unifex::bulk_transform(unifex::bulk_schedule(scheduler, n_recvs), [](auto...) {}, unifex::par_unseq);
+    const std::size_t n_recvs = op_->handler_.recv.cctc[index].size();
+    auto do_all_copies_for_this_recv = unifex::bulk_transform(
+        unifex::bulk_schedule(scheduler, n_recvs), 
+        [index, op_](int i) noexcept {
+          const auto& tags = op_->handler_.recv.cctc[index];
+          char* dptr = op_->handler_.recv.data[index][i];
+          const int ncomp = op_->components_.n_components;
+          // compute offset of the i-th tag
+          for (int prev = 0; prev < i; ++prev) {
+            using T = typename FAB::value_type;
+            dptr += tags[prev].sbox.numPts() * ncomp * sizeof(T);
+          }
+          const FabArrayBase::CopyComTag& tag = op_->handler_.recv.cctc[index][i];
+          FabArray<FAB>& fa = *op_->fa_;
+          Array4<T> darray = fa.array(tag.dstIndex);
+          Array4<const T> sarray = amrex::makeArray4((T const*)(dptr), tag.sbox, ncomp);
+          amrex::LoopConcurrentOnCpu(tag.dbox, ncomp, [=](int i, int j, int k, int n) noexcept {
+              darray(i,j,k,dcomp+n) = sarray(i,j,k,n);
+          });
+          const int local_index = fa.localindex(tag.dstIndex);
+          const int old_box_count =
+              op_->job_count_per_box_[local_index].fetch_sub(1, std::memory_order_acquire);
+          // we are the last job for this box
+          if (old_box_count == 1) {
+            unifex::set_next(op_->receiver_, tag.dstIndex, dest.box());
+          }
+          // we are the last job overall
+          const int old_count = op_->total_job_count_.fetch_sub(1, std::memory_order_acquire);
+          if (old_count == 1) {
+            unifex::set_value(std::move(op_->receiver_));
+          }
+        }, unifex::par_unseq);
     return unifex::bulk_join(do_all_copies_for_this_recv);
   }
 };
@@ -75,13 +107,19 @@ struct CopyOperations {
   std::vector<std::atomic<int>> job_count_per_box_{};
   std::atomic<int> total_job_count_{};
 
-  using SendLocalCopy = decltype(unifex::bulk_schedule(std::declval<unifex::get_scheduler_result_t<Receiver&>&>(), std::size_t{}));
-  using LocalCopyOperation = unifex::connect_result_t<SendLocalCopy, ReceiveLocalCopy<FAB, Receiver>>; 
+  using SendLocalCopy = decltype(unifex::bulk_schedule(
+      std::declval<unifex::get_scheduler_result_t<Receiver&>&>(), std::size_t{}));
+  using LocalCopyOperation =
+      unifex::connect_result_t<SendLocalCopy, ReceiveLocalCopy<FAB, Receiver>>;
 
   std::optional<LocalCopyOperation> local_copy_op_{};
 
   CopyOperations(
-      FabArray<FAB>* fa, NonLocalBC::CommHandler handler, const FabArrayBase::FB* meta_data, NonLocalBC::PackComponents components, Receiver&& r) noexcept
+      FabArray<FAB>* fa,
+      NonLocalBC::CommHandler handler,
+      const FabArrayBase::FB* meta_data,
+      NonLocalBC::PackComponents components,
+      Receiver&& r) noexcept
     : fa_(fa)
     , handler_(std::move(handler))
     , meta_data_(meta_data)
@@ -109,15 +147,18 @@ struct CopyOperations {
     if (meta_data_->m_LocTags->size() > 0) {
       auto scheduler = unifex::get_scheduler(receiver_);
       auto local_copies_sender = unifex::bulk_schedule(scheduler, meta_data_->m_LocTags->size());
-      // local_copy_op_.emplace(unifex::connect(std::move(local_copies_sender), ReceiveLocalCopy<FAB, Receiver>{this}));
-      local_copy_op_.emplace(unifex::connect(std::move(local_copies_sender), ReceiveLocalCopy<FAB, Receiver>{this}));
+      // local_copy_op_.emplace(unifex::connect(std::move(local_copies_sender),
+      // ReceiveLocalCopy<FAB, Receiver>{this}));
+      local_copy_op_.emplace(
+          unifex::connect(std::move(local_copies_sender), ReceiveLocalCopy<FAB, Receiver>{this}));
     }
-
 
     MPI_Comm comm = ParallelDescriptor::Communicator();
     auto comm_scheduler = ampi::get_comm_scheduler(receiver_);
-    auto for_each_request = ampi::bulk_on(comm_scheduler, ampi::for_each(std::move(handler_.recv.request), comm, handler_.mpi_tag));
-    auto unpack_receives = ampi::bulk_finally(std::move(for_each_request), UnpackReceives<FAB, Receiver>{this});
+    auto for_each_request = ampi::bulk_on(
+        comm_scheduler, ampi::for_each(std::move(handler_.recv.request), comm, handler_.mpi_tag));
+    auto unpack_receives =
+        ampi::bulk_finally(std::move(for_each_request), UnpackReceives<FAB, Receiver>{this});
     // unpack_receives_op_.emplace();
 
     // Process all send requests in a separate task
@@ -143,10 +184,17 @@ void ReceiveLocalCopy<FAB, Receiver>::set_next(int i) const noexcept {
   FabArray<FAB>& fa = *op_->fa_;
   const FAB& src = fa[tag.srcIndex];
   FAB& dest = fa[tag.dstIndex];
-  dest.template copy<RunOn::Host>(src, tag.sbox, op_->components_.src_component, tag.dbox, op_->components_.dest_component, op_->components_.n_components);
+  dest.template copy<RunOn::Host>(
+      src,
+      tag.sbox,
+      op_->components_.src_component,
+      tag.dbox,
+      op_->components_.dest_component,
+      op_->components_.n_components);
 
   const int local_index = fa.localindex(tag.dstIndex);
-  const int old_box_count = op_->job_count_per_box_[local_index].fetch_sub(1, std::memory_order_acquire);
+  const int old_box_count =
+      op_->job_count_per_box_[local_index].fetch_sub(1, std::memory_order_acquire);
   // we are the last job for this box
   if (old_box_count == 1) {
     unifex::set_next(op_->receiver_, tag.dstIndex, dest.box());
@@ -166,10 +214,12 @@ void ReceiveRemoteCopy<FAB, Receiver>::set_next(int i) const noexcept {
   // FabArray<FAB>& fa = *op_->fa_;
   // const FAB& src = fa[tag.srcIndex];
   // FAB& dest = fa[tag.dstIndex];
-  // dest.template copy<RunOn::Host>(src, tag.sbox, op_->components_.src_component, tag.dbox, op_->components_.dest_component, op_->components_.n_components);
+  // dest.template copy<RunOn::Host>(src, tag.sbox, op_->components_.src_component, tag.dbox,
+  // op_->components_.dest_component, op_->components_.n_components);
 
   // const int local_index = fa.localindex(tag.dstIndex);
-  // const int old_box_count = op_->job_count_per_box_[local_index].fetch_sub(1, std::memory_order_acquire);
+  // const int old_box_count = op_->job_count_per_box_[local_index].fetch_sub(1,
+  // std::memory_order_acquire);
   // // we are the last job for this box
   // if (old_box_count == 1) {
   //   unifex::set_next(op_->receiver_, tag.dstIndex, dest.box());
@@ -199,8 +249,15 @@ struct Sender {
   const FabArrayBase::FB* meta_data_;
   NonLocalBC::PackComponents components_;
 
-  Sender(FabArray<FAB>& fa, NonLocalBC::CommHandler handler, const FabArrayBase::FB& meta_data, NonLocalBC::PackComponents components) noexcept
-    : fa_{&fa}, handler_(std::move(handler)), meta_data_{&meta_data}, components_{components} {}
+  Sender(
+      FabArray<FAB>& fa,
+      NonLocalBC::CommHandler handler,
+      const FabArrayBase::FB& meta_data,
+      NonLocalBC::PackComponents components) noexcept
+    : fa_{&fa}
+    , handler_(std::move(handler))
+    , meta_data_{&meta_data}
+    , components_{components} {}
 
   template <typename Receiver>
   CopyOperations<FAB, std::remove_cvref_t<Receiver>> connect(Receiver&& r) && noexcept {
@@ -220,8 +277,8 @@ inline constexpr struct fn {
       NonLocalBC::CommHandler handler,
       const FabArrayBase::FB& cmd,
       const NonLocalBC::PackComponents& components) const noexcept {
-        return Sender<FAB>{fa, std::move(handler), cmd, components};
-      }
+    return Sender<FAB>{fa, std::move(handler), cmd, components};
+  }
 } FillBoundary_finish;
 
 }  // namespace fill_boundary_finish_
