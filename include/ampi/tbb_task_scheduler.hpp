@@ -103,17 +103,16 @@ template <typename Receiver>
 void parallel_enqueue_task(many_operation<Receiver>& op, std::size_t lo, std::size_t hi) {
   if (lo < hi) {
     const std::size_t mid = (lo + hi) / 2;
+    if (lo < mid) {
+      op.arena_->enqueue([&op, lo, mid] {  parallel_enqueue_task(op, lo, mid); });
+    } 
+    if (mid + 1 < hi) {
+      op.arena_->enqueue([&op, mid, hi] {  parallel_enqueue_task(op, mid + 1, hi); });
+    }
     unifex::set_next(op.receiver_, mid);
     const std::size_t previous_value = op.n_tasks_.fetch_sub(1, std::memory_order::acquire);
     if (previous_value == 1) {
       unifex::set_value(std::move(op.receiver_));
-    } else {
-      if (lo < mid) {
-        op.arena_->enqueue([&op, lo, mid] {  parallel_enqueue_task(op, lo, mid); });
-      } 
-      if (mid + 1 < hi) {
-        op.arena_->enqueue([&op, mid, hi] {  parallel_enqueue_task(op, mid + 1, hi); });
-      }
     }
   }
 }
