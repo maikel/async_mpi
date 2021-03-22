@@ -13,8 +13,8 @@ void EulerAmrCore::Advance(double dt) {
   // states is a MultiFab member variable
   states.FillBoundary();
   // Parallel for loop over all FABs in the MultiFab
-#ifdef AMREX_USE_OPENMP
-#pragma omp for
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
   for (MFIter mfi(states); mfi.isValid(); ++mfi) {
     const Box box = mfi.growntilebox();
