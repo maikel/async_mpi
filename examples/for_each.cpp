@@ -51,7 +51,7 @@ int main() {
     std::vector<std::span<int>> datas(comm_size);
     std::vector<MPI_Request> requests(comm_size);
     std::span<int> data(all_data);
-    for (int i = 0; i < datas.size(); ++i) {
+    for (std::size_t i = 0; i < datas.size(); ++i) {
       datas[i] = data.subspan(0, size);
       data = data.subspan(size);
       const int from_rank = i;
