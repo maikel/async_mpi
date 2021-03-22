@@ -67,7 +67,10 @@ void my_main() {
       FillBoundary_finish(mf, std::move(handler), cmd, components),
       [&mf](int index, const Box& box) {
         Array4<const Real> array = mf.const_array(index);
-        LoopConcurrentOnCpu(box, [=](int i, int j, int k) { AMREX_ASSERT(array(i, j, k) == 1.0); });
+        LoopConcurrentOnCpu(box, [=](int i, int j, int k) {
+          ignore_unused(i, j, k);
+          AMREX_ASSERT(array(i, j, k) == 1.0);
+        });
       },
       unifex::par_unseq);
   // Wait for everything being done.
