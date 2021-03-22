@@ -59,7 +59,7 @@ Dim3 Shift(Dim3 i, Direction dir, int n) noexcept {
 
 class EulerAmrCore : public AmrCore {
   enum { coarsest_level };
-  enum { RHO, RHOU, RHOV, RHOE, n_components };
+  enum { RHO, RHOU, RHOV, RHOW, RHOE, n_components };
 
   tbb::task_arena arena;
   MultiFab states;
@@ -75,7 +75,7 @@ class EulerAmrCore : public AmrCore {
         const Real rho = cons(i, j, k, RHO);
         const Real rhou = cons(i, j, k, RHOU);
         const Real rhov = cons(i, j, k, RHOV);
-        const Real rhow = cons(i, j, k, RHOV);
+        const Real rhow = cons(i, j, k, RHOW);
         const Real rhoE = cons(i, j, k, RHOE);
         const Real u = rhou / rho;
         const Real v = rhov / rho;
@@ -92,6 +92,7 @@ class EulerAmrCore : public AmrCore {
     return max_s > 0.0 ? dx / max_s : std::numeric_limits<Real>::max();
   }
 
+  // Compute the first order accurate HLLE flux for compressible euler equations
   void ComputeNumericFluxes(
       const Box& box,
       const Array4<Real>& flux,
@@ -131,7 +132,8 @@ class EulerAmrCore : public AmrCore {
       const Real maxA = std::max(aL, aR);
       // Compute Signal velocities
       const int ix = int(dir);
-      const int iy = 1 - ix;
+      const int iy = (ix + 1) % 3;
+      const int iz = (iy + 1) % 3;
       const Real sL1 = uL[ix] - maxA;
       const Real sL2 = roeU[ix] - roeA;
       const Real sR1 = roeU[ix] + roeA;
@@ -146,11 +148,12 @@ class EulerAmrCore : public AmrCore {
       auto HLLE = [=](Real fL, Real fR, Real qL, Real qR) {
         return (bR * qR - bL * qL + fL - fR) * db_positive_inv;
       };
-      int RHOUs[2] = {RHOU, RHOV};
+      int RHOUs[3] = {RHOU, RHOV, RHOW};
       // clang-format off
       flux(i,j,k,RHO)       = HLLE(rhouL[ix]            , rhouR[ix]            , rhoL     , rhoR);
       flux(i,j,k,RHOUs[ix]) = HLLE(rhouL[ix]*uL[ix] + pL, rhouR[ix]*uR[ix] + pR, rhouL[ix], rhouR[ix]);
       flux(i,j,k,RHOUs[iy]) = HLLE(rhouL[iy]*uL[ix]     , rhouR[iy]*uR[ix]     , rhouL[iy], rhouR[iy]);
+      flux(i,j,k,RHOUs[iz]) = HLLE(rhouL[iz]*uL[ix]     , rhouR[iz]*uR[ix]     , rhouL[iz], rhouR[iz]);
       flux(i,j,k,RHOE)      = HLLE(rhoL*hL*uL[ix]       , rhoR*hR*uR[ix]       , rhoEL    , rhoER);
       // clang-format on
     });
@@ -171,7 +174,7 @@ class EulerAmrCore : public AmrCore {
 
   void AdvanceTime(double dt) {
     auto advance = unifex::bulk_join(unifex::bulk_transform(
-      // tbb_scheduler for work and comm_scheduler for MPI_WaitAny
+      // tbb_scheduler to schedule work items and comm_scheduler to schedule MPI_WaitAny/All threads
       FillBoundary(tbb_scheduler, comm_scheduler, states), 
       [this, dt_over_dx](const Box& box, int K) {
         auto advance_dir = [&](Direction dir) {
@@ -183,6 +186,7 @@ class EulerAmrCore : public AmrCore {
           auto sarray = states.array(K);
           UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
         };
+        // first order accurate operator splitting
         advance_dir(Direction::x);
         advance_dir(Direction::y);
         advance_dir(Direction::z);
