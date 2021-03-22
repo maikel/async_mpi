@@ -2,34 +2,64 @@
 
 # Asynchronous Communication and Computation
 
-This library attempts to wrap communication procudures of MPI with concepts found in [libunifex](https://github.com/facebookexperimental/libunifex).
-Consider a blocking call to `MPI_WaitAll` as in:
+This library wraps the blocking communication procudure `amrex::FillBoundary` in an internal `MPI_WaitAny` loop that allows asynchronous dispatch with concepts found in [libunifex](https://github.com/facebookexperimental/libunifex).
+Consider a blocking call to `FillBoundary` as in:
 
 ```cpp
 // Block the current thread until all pending requests are done
-template <typename F>
-void WaitAll_and_do_something(std::vector<MPI_Request>& pending_requests, MPI_Comm comm, int tag) {
-  int n_reqs = static_cast<int>(pending_requests.size());
-  MPI_WaitAll(comm, n_reqs, pending_requests.data(), tag, MPI_IGNORE_STATUSES);
-  do_something();
+void EulerAmrCore::Advance(double dt) {
+  // Block call to FillBoundary, states is a MultiFab member variable
+  states.FillBoundary();
+  // Parallel for loop over all FABs in the MultiFab
+#ifdef AMREX_USE_OPENMP
+#pragma omp for
+#endif
+  for (MFIter mfi(states); mfi.isValid(); ++mfi) {
+    auto advance_dir = [&](Direction dir) {
+      auto csarray = states.const_array(mfi);
+      auto farray = fluxes[dir_v].array(mfi);
+      Box faces = shrink(convert(box, unit(dir)), 1, unit(dir));
+      ComputeNumericFluxes(faces, farray, csarray, dir);
+      auto cfarray = fluxes[dir_v].const_array(K);
+      auto sarray = states.array(K);
+      UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
+    };
+    // first order accurate operator splitting
+    advance_dir(Direction::x);
+    advance_dir(Direction::y);
+    advance_dir(Direction::z);
+  }
+  // implicit join of all OpenMP threads here
 }
 ```
 
-This library provides thin wrappers around those MPI calls and enables the usage of the Sender/Receiver model that is developed in [libunifex](https://github.com/facebookexperimental/libunifex).
+This library provides thin wrappers around this FillBoundary call and enables the usage of the Sender/Receiver model that is developed in [libunifex](https://github.com/facebookexperimental/libunifex).
 
 The above example could read instead
 ```cpp
-// Returns a ManySender type that will lazily start on an user-defined executor thread.
-auto async_do_something(std::vector<MPI_Request> pending_requests, MPI_Comm, comm int tag) {
-  return ampi::for_each(std::move(pending_requests), comm, tag) 
-         | unifex::bulk_transform([](int index) { do_something(index); });
-}
+  void AsyncAdvance(double dt) {
+    auto advance = unifex::bulk_join(unifex::bulk_transform(
+      // tbb_scheduler to schedule work items and comm_scheduler to schedule MPI_WaitAny/All threads
+      FillBoundary(tbb_scheduler, comm_scheduler, states), 
+      [this, dt_over_dx](const Box& box, int K) {
+        auto advance_dir = [&](Direction dir) {
+          auto csarray = states.const_array(K);
+          auto farray = fluxes[dir_v].array(K);
+          Box faces = shrink(convert(box, unit(dir)), 1, unit(dir));
+          ComputeNumericFluxes(faces, farray, csarray, dir);
+          auto cfarray = fluxes[dir_v].const_array(K);
+          auto sarray = states.array(K);
+          UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
+        };
+        // first order accurate operator splitting
+        advance_dir(Direction::x);
+        advance_dir(Direction::y);
+        advance_dir(Direction::z);
+      }, unifex::par_unseq));
+    // Explicitly wait here until the above is done for all boxes
+    unifex::sync_wait(std::move(advance));
+  }
+
 ```
 
-It's intent is to try out a structural parallel programming model in classical HPC applications such as a finite volume flow solver on structured grids.
-
-The examples will include a test that uses this programming model in conjunction with the [AMReX](https://github.com/AMReX-Codes/amrex) framework which is used to distribute a multi dimensional grid to multiple compute nodes of a cluster, which uses MPI under the hood. 
-
-AMReX's usual strategy to CPU parallelization involves using parallel OpenMP blocks that are mostly separate from the MPI communication procedures.
-
-The functions in this library enable other parallel programming models beside the OpenMP model, which are based on tasks.
+The intent is to try out a structural parallel programming model in classical HPC applications such as in a finite volume flow solver on structured grids.
