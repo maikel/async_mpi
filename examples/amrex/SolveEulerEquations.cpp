@@ -61,17 +61,16 @@ class EulerAmrCore : public AmrCore {
   enum { coarsest_level };
   enum { RHO, RHOU, RHOV, RHOE, n_components };
 
+  tbb::task_arena arena;
   MultiFab states;
   std::vector<MultiFab> fluxes;
-  int rank{2};
 
   EulerEquation equation;
 
   Real ComputeStableDt() const {
-    Real max_s = 0.0;
-    for (MFIter mfi(states); mfi.isValid(); ++mfi) {
-      const Box box = mfi.growntilebox();
-      Array4<const Real> cons = states.const_array(mfi);
+    const Real max_s = ReduceMax(tbb_scheduler, states, [&](const Box& box, int K) {
+      Array4<const Real> cons = states.const_array(K);
+      Real max_s = 0.0;
       LoopConcurrentOnCpu(box, [&](int i, int j, int k) {
         const Real rho = cons(i, j, k, RHO);
         const Real rhou = cons(i, j, k, RHOU);
@@ -86,7 +85,8 @@ class EulerAmrCore : public AmrCore {
         const Real abs_a = std::abs(a);
         max_s = std::max(max_s, std::max({std::abs(u), std::abs(v), std::abs(w)}) + std::abs(a));
       });
-    }
+      return max_s;
+    });
     const Geometry& geom = Geom(coarsest_level);
     const Real dx = std::min({geom.CellSize(0), geom.CellSize(1), geom.CellSize(2)});
     return max_s > 0.0 ? dx / max_s : std::numeric_limits<Real>::max();
@@ -156,21 +156,6 @@ class EulerAmrCore : public AmrCore {
     });
   }
 
-  void ComputeNumericFluxes(Real dt, Direction dir) {
-    std::size_t dir_s = static_cast<std::size_t>(dir);
-    if (rank <= dir_s) {
-      return;
-    }
-    MultiFab& fs = fluxes[dir_s];
-    for (MFIter mfi(fs); mfi.isValid(); ++mfi) {
-      // box is a face centered box
-      const Box box = mfi.growntilebox();
-      Array4<Real> flux = fs.array(mfi);
-      Array4<const Real> cons = states.const_array(mfi);
-      ComputeNumericFluxes(box, flux, cons, dir);
-    }
-  }
-
   void UpdateConservatively(
       const Box& box,
       const Array4<Real>& cons,
@@ -184,18 +169,26 @@ class EulerAmrCore : public AmrCore {
     });
   }
 
-  void UpdateConservatively(Real dt, Direction dir) {
-    const int dir_v = to_underlying(dir);
-    AMREX_ASSERT(0 <= dir_v && dir_v < rank);
-    const Real dx = Geom(0).CellSize(dir_v);
-    const Real dt_over_dx = dt / dx;
-    const IntVect direction_vector = IntVect::TheDimensionVector(dir_v);
-    for (MFIter mfi(states); mfi.isValid(); ++mfi) {
-      Array4<Real> sarray = states.array(mfi);
-      Array4<const Real> farray = fluxes[dir_v].const_array(mfi);
-      const Box update_box = mfi.growntilebox() & enclosedCells(fluxes[dir_v][mfi].box());
-      UpdateConservatively(update_box, sarray, farray, dt_over_dx, dir);
-    }
+  void AdvanceTime(double dt) {
+    auto advance = unifex::bulk_join(unifex::bulk_transform(
+      // tbb_scheduler for work and comm_scheduler for MPI_WaitAny
+      FillBoundary(tbb_scheduler, comm_scheduler, states), 
+      [this, dt_over_dx](const Box& box, int K) {
+        auto advance_dir = [&](Direction dir) {
+          auto csarray = states.const_array(K);
+          auto farray = fluxes[dir_v].array(K);
+          Box faces = shrink(convert(box, unit(dir)), 1, unit(dir));
+          ComputeNumericFluxes(faces, farray, csarray, dir);
+          auto cfarray = fluxes[dir_v].const_array(K);
+          auto sarray = states.array(K);
+          UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
+        };
+        advance_dir(Direction::x);
+        advance_dir(Direction::y);
+        advance_dir(Direction::z);
+      }, unifex::par_unseq));
+    // wait here until the above is done for all boxes
+    unifex::sync_wait(std::move(advance));
   }
 
 private:
