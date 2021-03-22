@@ -117,7 +117,7 @@ struct UnpackReceivesFactory {
           char* dptr = op_->handler_.recv.data[index];
           const int ncomp = op_->components_.n_components;
           // compute offset of the i-th tag
-          for (int prev = 0; prev < i; ++prev) {
+          for (std::size_t prev = 0; prev < i; ++prev) {
             using T = typename FAB::value_type;
             dptr += tags[prev].sbox.numPts() * ncomp * sizeof(T);
           }

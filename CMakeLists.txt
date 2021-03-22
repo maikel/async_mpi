@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(AsyncMPI CXX C)
+project(AsyncMPI CXX C Fortran)
 
 find_package(MPI REQUIRED C CXX)
 
