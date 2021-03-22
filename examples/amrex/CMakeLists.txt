@@ -1,2 +1,5 @@
 add_executable(FillBoundary FillBoundary.cpp)
 target_link_libraries(FillBoundary PRIVATE AsyncMPI)
+
+add_executable(FillBoundary_old FillBoundary_old.cpp)
+target_link_libraries(FillBoundary_old PRIVATE AsyncMPI)
