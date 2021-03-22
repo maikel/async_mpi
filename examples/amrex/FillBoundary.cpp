@@ -24,9 +24,9 @@ inline constexpr auto then = bulk_transform;
 
 void my_main() {
   using namespace amrex;
-  Box domain{IntVect(0), IntVect(63)};
+  Box domain{IntVect(0), IntVect(127)};
   BoxArray ba{domain};
-  ba.maxSize(8);
+  ba.maxSize(64);
 
   DistributionMapping dm(ba);
 
@@ -66,8 +66,6 @@ void my_main() {
   auto async_test_for_unity = then(
       FillBoundary_finish(mf, std::move(handler), cmd, components),
       [&mf](int index, const Box& box) {
-        const std::size_t thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-        const int rank = ParallelDescriptor::MyProc();
         Array4<const Real> array = mf.const_array(index);
         LoopConcurrentOnCpu(box, [=](int i, int j, int k) { AMREX_ASSERT(array(i, j, k) == 1.0); });
       },
