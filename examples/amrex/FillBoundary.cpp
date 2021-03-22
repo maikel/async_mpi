@@ -21,9 +21,8 @@ using namespace unifex;
 using namespace ampi;
 
 inline constexpr auto then = bulk_transform;
-inline constexpr auto when_all = bulk_join;
 
-void my_main(MPI_Comm comm) {
+void my_main() {
   using namespace amrex;
   Box domain{IntVect(0), IntVect(63)};
   BoxArray ba{domain};
@@ -41,7 +40,8 @@ void my_main(MPI_Comm comm) {
 
   // for (MFIter mfi(mf); mfi.isValid(); ++mfi) {
   //   Array4<const Real> array = mf.const_array(mfi);
-  //   LoopConcurrentOnCpu(mfi.growntilebox(), [=](int i, int j, int k) { AMREX_ASSERT(array(i, j, k) == 1.0); });
+  //   LoopConcurrentOnCpu(mfi.growntilebox(), [=](int i, int j, int k) { AMREX_ASSERT(array(i, j,
+  //   k) == 1.0); });
   // }
 
   // Fill all domain boundaries periodically
@@ -55,31 +55,29 @@ void my_main(MPI_Comm comm) {
   // Get comm meta data from amrex
   const FabArrayBase::FB& cmd = mf.getFB(ngrow, geom.periodicity(), false, false);
   auto handler = FillBoundary_nowait(mf, cmd, components);
-  
+
   tbb::task_arena arena{};
   tbb_task_scheduler oneTBB(arena);
 
   single_thread_context comm_ctx;
   auto comm_scheduler = comm_ctx.get_scheduler();
 
-
-  const std::size_t thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-  Print() << thread_id << '\n';
-
   // Do some work asynchronously while receiving data
   auto async_test_for_unity = then(
       FillBoundary_finish(mf, std::move(handler), cmd, components),
       [&mf](int index, const Box& box) {
         const std::size_t thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-        Print() << thread_id << ": mf[" << index << "] = " << box << '\n';
+        const int rank = ParallelDescriptor::MyProc();
         Array4<const Real> array = mf.const_array(index);
-        LoopConcurrentOnCpu(box, [=](int i, int j, int k) {
-          AMREX_ASSERT(array(i, j, k) == 1.0); 
-        });
-      });
+        LoopConcurrentOnCpu(box, [=](int i, int j, int k) { AMREX_ASSERT(array(i, j, k) == 1.0); });
+      },
+      unifex::par_unseq);
   // Wait for everything being done.
 
-  sync_wait(with_query_value(with_query_value(when_all(std::move(async_test_for_unity)), get_scheduler, oneTBB), get_comm_scheduler, comm_scheduler));
+  sync_wait(with_query_value(
+      with_query_value(bulk_join(std::move(async_test_for_unity)), get_scheduler, oneTBB),
+      get_comm_scheduler,
+      comm_scheduler));
 }
 
 int main(int argc, char** argv) {
@@ -94,14 +92,14 @@ int main(int argc, char** argv) {
   scope_guard mpi_finalize = []() noexcept {
     MPI_Finalize();
   };
-  MPI_Comm comm = MPI_COMM_WORLD;
 
   // Initialize AMReX
-  amrex::Initialize(comm, std::cout, std::cerr, [](const char* msg) { throw std::runtime_error(msg); });
+  amrex::Initialize(
+      MPI_COMM_WORLD, std::cout, std::cerr, [](const char* msg) { throw std::runtime_error(msg); });
   scope_guard amrex_finalize = []() noexcept {
     amrex::Finalize();
   };
 
   // Call our Application
-  my_main(comm);
+  my_main();
 }
