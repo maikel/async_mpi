@@ -338,19 +338,23 @@ void my_main() {
 
   EulerEquation equation{1.4};
 
-  EulerAmrCore core(equation, geom, info);
+  EulerAmrCore core(equation, geom);
   //WritePlotfiles(core, 0.0, 0);
 
   double t = 0.0; 
   int steps = 0;
   
   while (t < 1.0) {
+    auto start = std::chrono::steady_clock::now();
     double dt = 0.3 * core.ComputeStableDt();
-    Print() << "Stable dt: " << dt << '\n';
     core.AdvanceTime(dt);
-
+    auto stop = std::chrono::steady_clock::now();
+    std::chrono::nanoseconds diff_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+    std::chrono::nanoseconds diff_us = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+    std::chrono::nanoseconds diff_ms = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
     t += dt;
     steps += 1;
+    Print() << "[" << diff_ns.count() << "ns : " << diff_us << "us : " <<  duff_ms << "ms] t: " << t << '\n';
     // WritePlotfiles(core, t, steps);
   }
 }

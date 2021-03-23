@@ -310,7 +310,7 @@ void my_main() {
 
   EulerEquation equation{1.4};
 
-  EulerAmrCore core(equation, geom, info);
+  EulerAmrCore core(equation, geom);
   // WritePlotfiles(core, 0.0, 0)cd ;
 
   double t = 0.0;
