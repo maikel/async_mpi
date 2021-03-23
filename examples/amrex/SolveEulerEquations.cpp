@@ -354,7 +354,7 @@ void my_main() {
     std::chrono::nanoseconds diff_ms = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
     t += dt;
     steps += 1;
-    Print() << "[" << diff_ns.count() << "ns : " << diff_us << "us : " <<  duff_ms << "ms] t: " << t << '\n';
+    Print() << "[" << diff_ns.count() << "ns : " << diff_us.count() << "us : " <<  diff_ms.count() << "ms] t: " << t << '\n';
     // WritePlotfiles(core, t, steps);
   }
 }
