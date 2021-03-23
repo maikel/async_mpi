@@ -15,11 +15,9 @@ namespace reduce_ns {
 template <typename Scheduler, typename F, typename ResultType, typename BinaryOp>
 unifex::any_sender_of<ResultType>
 reduce(const Scheduler& scheduler, F f, const ResultType& x0, BinaryOp binary_op, int lo, int hi) {
-  if (lo == hi) {
-    return unifex::just(f(lo));
-  }
+  assert(lo < hi);
   if (hi == lo + 1) {
-    return unifex::just(std::move(binary_op)(f(lo), f(hi)));
+    return unifex::just(f(lo));
   }
   const int mid = (lo + hi) / 2;
   auto lo_val = unifex::on(reduce(scheduler, f, x0, binary_op, lo, mid), scheduler);
@@ -50,10 +48,12 @@ ResultType reduce(
     amrex::Box box = fa.box(K);
     return f(box, K);
   };
-  std::optional<ResultType> value = unifex::sync_wait(
+  assert(local_size > 0);
+  std::optional<ResultType> maybe_value = unifex::sync_wait(
       reduce_ns::reduce(scheduler, std::move(local_index_to_value), x0, std::forward<BinaryOp>(binary_op), 0, local_size));
-  AMREX_ALWAYS_ASSERT(value);
-  return *value;
+  AMREX_ALWAYS_ASSERT(maybe_value);
+  ResultType value = *maybe_value;
+  return value;
 }
 
 template <typename Scheduler, typename FAB, typename F>
