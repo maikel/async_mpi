@@ -28,9 +28,8 @@ void my_main() {
   for (MFIter mfi(mf); mfi.isValid(); ++mfi) {
     Box box = mfi.validbox();
     Array4<const Real> array = mf.const_array(mfi);
-    LoopConcurrentOnCpu(box, [=](int i, int j, int k) { 
-      AMREX_ALWAYS_ASSERT(array(i, j, k) == 1.0); 
-    });
+    LoopConcurrentOnCpu(
+        box, [=](int i, int j, int k) { AMREX_ALWAYS_ASSERT(array(i, j, k) == 1.0); });
   }
 }
 
