@@ -125,7 +125,7 @@ struct UnpackReceivesFactory {
           FabArray<FAB>& fa = *op_->fa_;
           using T = typename FAB::value_type;
           Array4 darray = fa.array(tag.dstIndex);
-          Array4 sarray = amrex::makeArray4((T const*)(dptr), tag.sbox, ncomp);
+          Array4 sarray = amrex::makeArray4((T const*)(dptr), tag.dbox, ncomp);
           const int dcomp = op_->components_.dest_component;
           amrex::LoopConcurrentOnCpu(tag.dbox, ncomp, [=](int i, int j, int k, int n) noexcept {
             darray(i, j, k, dcomp + n) = sarray(i, j, k, n);
