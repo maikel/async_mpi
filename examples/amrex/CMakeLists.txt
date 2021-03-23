@@ -4,5 +4,5 @@ target_link_libraries(FillBoundary PRIVATE AsyncMPI)
 add_executable(FillBoundary_old FillBoundary_old.cpp)
 target_link_libraries(FillBoundary_old PRIVATE AsyncMPI)
 
-add_executable(SolveEulerEquations SolverEulerEquations.cpp)
+add_executable(SolveEulerEquations SolveEulerEquations.cpp)
 target_link_libraries(SolveEulerEquations PUBLIC AsyncMPI)

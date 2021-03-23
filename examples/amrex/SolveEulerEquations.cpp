@@ -5,10 +5,13 @@
 #include <ampi/bulk_on.hpp>
 #include <ampi/tbb_task_scheduler.hpp>
 
+#include <ampi/amrex/ReduceMax.hpp>
+
 #include <unifex/single_thread_context.hpp>
 #include <unifex/bulk_join.hpp>
 #include <unifex/bulk_transform.hpp>
 #include <unifex/sync_wait.hpp>
+#include <unifex/static_thread_pool.hpp>
 
 #include <ranges>
 
@@ -61,14 +64,17 @@ class EulerAmrCore : public AmrCore {
   enum { coarsest_level };
   enum { RHO, RHOU, RHOV, RHOW, RHOE, n_components };
 
-  tbb::task_arena arena;
+  tbb::task_arena arena{};
+  unifex::static_thread_pool communication_thread_pool{2};
+
   MultiFab states;
-  std::vector<MultiFab> fluxes;
+  std::array<MultiFab, AMREX_SPACEDIM> fluxes;
 
   EulerEquation equation;
 
-  Real ComputeStableDt() const {
-    const Real max_s = ReduceMax(tbb_scheduler, states, [&](const Box& box, int K) {
+  Real ComputeStableDt() {
+    ampi::tbb_task_scheduler work_scheduler(arena);
+    const Real max_s = ampi::reduce_max(work_scheduler, states, [&](const Box& box, int K) {
       Array4<const Real> cons = states.const_array(K);
       Real max_s = 0.0;
       LoopConcurrentOnCpu(box, [&](int i, int j, int k) {
@@ -98,24 +104,26 @@ class EulerAmrCore : public AmrCore {
       const Array4<Real>& flux,
       const Array4<const Real>& cons,
       Direction dir) const {
-    ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+    ParallelFor(box, [=, this] AMREX_GPU_DEVICE(int i, int j, int k) {
       // (i,j,k) is face centered and left of cell index (i,j,k)
       Dim3 iR{i, j, k};
       Dim3 iL = Shift(iR, dir, -1);
       // Load left state
       const Real rhoL = cons(iL.x, iL.y, iL.z, RHO);
-      const Real rhouL[2] = {cons(iL.x, iL.y, iL.z, RHOU), cons(iL.x, iL.y, iL.z, RHOV)};
+      const Real rhouL[3] = {
+          cons(iL.x, iL.y, iL.z, RHOU), cons(iL.x, iL.y, iL.z, RHOV), cons(iL.x, iL.y, iL.z, RHOW)};
       const Real rhoEL = cons(iL.x, iL.y, iL.z, RHOE);
-      const Real uL[2]{rhouL[0] / rhoL, rhouL[1] / rhoL};
-      const Real pL = equation.Pressure(rhoL, rhouL[0], rhouL[1], rhoEL);
+      const Real uL[3]{rhouL[0] / rhoL, rhouL[1] / rhoL};
+      const Real pL = equation.Pressure(rhoL, rhouL[0], rhouL[1], rhouL[2], rhoEL);
       const Real aL = std::sqrt(equation.gamma * pL / rhoL);
       const Real hL = (rhoEL + pL) / rhoL;
       // Load right state
       const Real rhoR = cons(iR.x, iR.y, iR.z, RHO);
-      const Real rhouR[2] = {cons(iR.x, iR.y, iR.z, RHOU), cons(iR.x, iR.y, iR.z, RHOV)};
+      const Real rhouR[3] = {
+          cons(iR.x, iR.y, iR.z, RHOU), cons(iR.x, iR.y, iR.z, RHOV), cons(iR.x, iR.y, iR.z, RHOW)};
       const Real rhoER = cons(iR.x, iR.y, iR.z, RHOE);
-      const Real uR[2]{rhouR[0] / rhoR, rhouR[1] / rhoR};
-      const Real pR = equation.Pressure(rhoR, rhouR[0], rhouR[1], rhoER);
+      const Real uR[3]{rhouR[0] / rhoR, rhouR[1] / rhoR};
+      const Real pR = equation.Pressure(rhoR, rhouR[0], rhouR[1], rhouR[2], rhoER);
       const Real aR = std::sqrt(equation.gamma * pR / rhoR);
       const Real hR = (rhoER + pR) / rhoR;
       // Compute Roe averages
@@ -172,27 +180,38 @@ class EulerAmrCore : public AmrCore {
     });
   }
 
-  void AdvanceTime(double dt) {
+  void AsyncAdvanceTime(Real dt) {
+    const Real* dx = Geom(coarsest_level).CellSize();
+    const Real dt_over_dx[AMREX_SPACEDIM] = {AMREX_D_DECL(dt / dx[0], dt / dx[1], dt / dx[2])};
     auto advance = unifex::bulk_join(unifex::bulk_transform(
-      // tbb_scheduler to schedule work items and comm_scheduler to schedule MPI_WaitAny/All threads
-      FillBoundary(tbb_scheduler, comm_scheduler, states), 
-      [this, dt_over_dx](const Box& box, int K) {
-        auto advance_dir = [&](Direction dir) {
-          auto csarray = states.const_array(K);
-          auto farray = fluxes[dir_v].array(K);
-          Box faces = shrink(convert(box, unit(dir)), 1, unit(dir));
-          ComputeNumericFluxes(faces, farray, csarray, dir);
-          auto cfarray = fluxes[dir_v].const_array(K);
-          auto sarray = states.array(K);
-          UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
-        };
-        // first order accurate operator splitting
-        advance_dir(Direction::x);
-        advance_dir(Direction::y);
-        advance_dir(Direction::z);
-      }, unifex::par_unseq));
+        // work_scheduler to schedule work items and comm_scheduler to schedule MPI_WaitAny/All
+        // threads
+        FillBoundary_async(states, Geom(coarsest_level).periodicity()),
+        [this, dt_over_dx](int K, const Box& box) {
+          auto advance_dir = [&](Direction dir) {
+            const auto dir_v = std::size_t(dir);
+            auto csarray = states.const_array(K);
+            auto farray = fluxes[dir_v].array(K);
+            const Box faces = grow(convert(box, IntVect::TheDimensionVector(dir_v)), dir, -1);
+            ComputeNumericFluxes(faces, farray, csarray, dir);
+            auto cfarray = fluxes[dir_v].const_array(K);
+            auto sarray = states.array(K);
+            const Box inner_box = grow(box, -1);
+            UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
+          };
+          // first order accurate operator splitting
+          advance_dir(Direction::x);
+          advance_dir(Direction::y);
+          advance_dir(Direction::z);
+        },
+        unifex::par_unseq));
     // wait here until the above is done for all boxes
-    unifex::sync_wait(std::move(advance));
+    ampi::tbb_task_scheduler work_scheduler(arena);
+    auto comm_scheduler = communication_thread_pool.get_scheduler();
+    unifex::sync_wait(unifex::with_query_value(
+        unifex::with_query_value(std::move(advance), unifex::get_scheduler, work_scheduler),
+        ampi::get_comm_scheduler,
+        comm_scheduler));
   }
 
 private:
@@ -208,12 +227,11 @@ private:
     if (level > 0) {
       throw std::runtime_error("For simplicity, this example supports only one level.");
     }
-    const IntVect ngrow{AMREX_D_DECL(1, 1, 0)};
+    const IntVect ngrow{AMREX_D_DECL(1, 1, 1)};
     states.define(box_array, distribution_mapping, n_components, ngrow);
-    const IntVect ngrow_fs[2] = {ngrow[0] * e_y, ngrow[1] * e_x};
-    AMREX_ASSERT(rank < 2);
-    for (int i = 0; i < rank; ++i) {
-      fluxes.emplace_back(box_array, distribution_mapping, n_components, ngrow_fs[i]);
+    const IntVect ngrow_fs[AMREX_SPACEDIM] = {AMREX_D_DECL(ngrow - ngrow[0] * e_x, ngrow - ngrow[1] * e_y, ngrow - ngrow[2] * e_z)};
+    for (int i = 0; i < AMREX_SPACEDIM; ++i) {
+      fluxes[i].define(box_array, distribution_mapping, n_components, ngrow_fs[i]);
     }
   }
 

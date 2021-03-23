@@ -245,4 +245,14 @@ inline constexpr struct fn {
 
 using fill_boundary_finish_::FillBoundary_finish;
 
+template <typename FAB>
+auto FillBoundary_async(FabArray<FAB>& fa, const Periodicity& period)
+{
+  NonLocalBC::PackComponents components{.dest_component = 0, .src_component = 0, .n_components = fa.nComp()};
+  // Get comm meta data from amrex
+  const FabArrayBase::FB& cmd = fa.getFB(fa.nGrowVect(), period, false, false);
+  auto handler = FillBoundary_nowait(fa, cmd, components);
+  return FillBoundary_finish(fa, std::move(handler), cmd, components);
+}
+
 }  // namespace amrex
