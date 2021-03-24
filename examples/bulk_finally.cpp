@@ -3,6 +3,7 @@
 #include <ampi/mpi_abort_on_error.hpp>
 #include <ampi/tbb_task_scheduler.hpp>
 #include <ampi/for_each.hpp>
+#include <ampi/openmp_scheduler.hpp>
 
 #include <mpi.h>
 
@@ -64,12 +65,16 @@ int main() {
 
     single_thread_context communication_thread{};
 
-    tbb::task_arena arena{};
-    ampi::tbb_task_scheduler intel_tbb{arena};
+    // tbb::task_arena arena{};
+    // ampi::tbb_task_scheduler intel_tbb{arena};
+    ampi::openmp_scheduler scheduler{};
 
+    #pragma omp parallel
+    #pragma omp single
+    {
     submit(
         transform(
-            schedule(intel_tbb),
+            schedule(scheduler),
             [comm_rank] {
               const std::size_t thread_id =
                   std::hash<std::thread::id>{}(std::this_thread::get_id());
@@ -80,11 +85,11 @@ int main() {
     sync_wait(
         bulk_join(ampi::bulk_finally(
             ampi::for_each(std::move(requests), comm, tag),
-            [comm_rank, &intel_tbb](int index) {
+            [comm_rank, &scheduler](int index) {
               const std::size_t thread_id =
                   std::hash<std::thread::id>{}(std::this_thread::get_id());
               std::printf("%d-%zu: Received request at index %d.\n", comm_rank, thread_id, index);
-              auto work = transform(unifex::schedule(intel_tbb), [comm_rank] {
+              auto work = transform(unifex::schedule(scheduler), [comm_rank] {
                 const std::size_t thread_id =
                     std::hash<std::thread::id>{}(std::this_thread::get_id());
                 std::printf("%d-%zu: On TBB thread.\n", comm_rank, thread_id);
@@ -94,13 +99,14 @@ int main() {
 
     submit(
         transform(
-            schedule(intel_tbb),
+            schedule(scheduler),
             [comm_rank] {
               const std::size_t thread_id =
                   std::hash<std::thread::id>{}(std::this_thread::get_id());
               std::printf("%d-%zu: Hello TBB #2.\n", comm_rank, thread_id);
             }),
         ampi::mpi_abort_on_error{comm});
+  }
   }
 
   AMPI_CALL_MPI(MPI_Wait(&send_request, MPI_STATUS_IGNORE));
