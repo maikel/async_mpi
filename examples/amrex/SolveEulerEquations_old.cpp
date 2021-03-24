@@ -231,7 +231,7 @@ public:
 #  pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
       for (MFIter mfi(states, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const Box tilebox = mfi.tilebox();
+        const Box tilebox = grow(mfi.growntilebox(), dir, -1);
         auto cfarray = fluxes[dir].const_array(mfi);
         auto sarray = states.array(mfi);
         UpdateConservatively(tilebox, sarray, cfarray, dt_over_dx[dir], Direction(dir));

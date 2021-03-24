@@ -326,123 +326,135 @@ public:
     // states.FillBoundary(Geom(coarsest_level).periodicity());
     const Real* dx = Geom(coarsest_level).CellSize();
     const Real dt_over_dx[AMREX_SPACEDIM] = {AMREX_D_DECL(dt / dx[0], dt / dx[1], dt / dx[2])};
-#pragma omp parallel
-    {
-#pragma omp single
-      {
-        auto advance = unifex::bulk_join(unifex::bulk_transform(
-            // work_scheduler to schedule work items and comm_scheduler to schedule MPI_WaitAny/All
-            // threads
-            FillBoundary_async(states, Geom(coarsest_level).periodicity()),
-            [this, dt_over_dx](int K, const Box&) {
-              const FabArrayBase::TileArray* tiles =
-                  states.getTileArray(IntVect{FabArrayBase::mfiter_tile_size});
-              auto first_tile = std::lower_bound(tiles->indexMap.begin(), tiles->indexMap.end(), K);
-              auto last_tile = std::upper_bound(tiles->indexMap.begin(), tiles->indexMap.end(), K);
-              auto compute_fluxes = [this, tiles, K](Direction dir, int tile_index) {
-                const auto dir_v = std::size_t(dir);
-                const Box face_tilebox = tilebox(
-                    states.boxArray(),
-                    *tiles,
-                    tile_index,
-                    IntVect::TheDimensionVector(dir_v),
-                    IntVect(0));
-                auto csarray = states.const_array(K);
-                auto farray = fluxes[dir_v].array(K);
-                ComputeNumericFluxes(face_tilebox, farray, csarray, dir);
-              };
-              auto update_conservatively =
-                  [this, tiles, K, dt_over_dx](Direction dir, int tile_index) {
-                    const auto dir_v = std::size_t(dir);
-                    const Box box = tilebox(states.boxArray(), *tiles, tile_index);
-                    auto sarray = states.array(K);
-                    auto cfarray = fluxes[dir_v].const_array(K);
-                    UpdateConservatively(box, sarray, cfarray, dt_over_dx[dir_v], dir);
-                  };
-              for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
-                for (auto it = first_tile; it != last_tile; ++it) {
-                  auto tile_index = std::distance(tiles->indexMap.begin(), it);
-#pragma omp task firstprivate(tile_index)
-                  compute_fluxes(Direction(dir), tile_index);
-                }
-#pragma omp taskwait
-                for (auto it = first_tile; it != last_tile; ++it) {
-                  auto tile_index = std::distance(tiles->indexMap.begin(), it);
-#pragma omp task firstprivate(tile_index)
-                  update_conservatively(Direction(dir), tile_index);
-                }
-#pragma omp taskwait
-              }
-            },
-            unifex::par_unseq));
-        // wait here until the above is done for all boxes
-        // ampi::tbb_task_scheduler work_scheduler(arena);
-        ampi::openmp_scheduler work_scheduler{};
-        // auto work_scheduler = unifex::inline_scheduler{};
-        // auto work_scheduler = stc.get_scheduler();
-        // auto comm_scheduler = communication_thread_pool.get_scheduler();
-        auto comm_scheduler = stc.get_scheduler();
-        unifex::sync_wait(unifex::with_query_value(
-            unifex::with_query_value(std::move(advance), unifex::get_scheduler, work_scheduler),
-            ampi::get_comm_scheduler,
-            comm_scheduler));
+    const FabArrayBase::FB& cmd = states.getFB(states.nGrowVect(), Geom(coarsest_level).periodicity(), false, false);
+    NonLocalBC::PackComponents components{.dest_component = 0, .src_component = 0, .n_components = states.nComp()};
+    auto handler = NonLocalBC::ParallelCopy_nowait(states, states, cmd, components);
+    std::vector<int> job_count_per_box_(states.local_size());
+    // count jobs per box that depend on MPI receives
+    for (auto [from, tags] : *cmd.m_RcvTags) {
+      for (const FabArrayBase::CopyComTag& tag : tags) {
+        const int i = states.localindex(tag.dstIndex);
+        job_count_per_box_[i] += 1;
+      }
+    }
+    const FabArrayBase::TileArray* tiles = states.getTileArray(IntVect{FabArrayBase::mfiter_tile_size});
+    const int ntiles = tiles->tileArray.size();
+
+    auto compute_fluxes = [this, tiles](int K, int tile_index, int dir) {
+      const Box face_tilebox = tilebox(
+          states.boxArray(),
+          *tiles,
+          tile_index,
+          IntVect::TheDimensionVector(dir),
+          IntVect(0));
+      auto csarray = states.const_array(K);
+      auto farray = fluxes[dir].array(K);
+      // Print() << face_tilebox << '\n';
+      ComputeNumericFluxes(face_tilebox, farray, csarray, Direction(dir));
+    };
+
+    auto update_conservatively =
+        [this, tiles, dt_over_dx](int K, int tile_index, int dir) {
+          const Box box = grow(tilebox(states.boxArray(), *tiles, tile_index, IntVect::TheCellVector(), IntVect(1)), dir, -1);
+          auto sarray = states.array(K);
+          auto cfarray = fluxes[dir].const_array(K);
+          UpdateConservatively(box, sarray, cfarray, dt_over_dx[dir], Direction(dir));
+        };
+
+    ///////////////////////////////////////////////////////////////////////
+    //                                          Do local time integration 
+    for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+      #pragma omp parallel for
+      for (int i = 0; i < ntiles; ++i) {
+        const int K = tiles->indexMap[i];
+        const int loc = tiles->localIndexMap[i];
+        if (job_count_per_box_[loc] == 0) {
+          compute_fluxes(K, i, dir);
+        }
+      }
+      #pragma omp parallel for
+      for (int i = 0; i < ntiles; ++i) {
+        const int K = tiles->indexMap[i];
+        const int loc = tiles->localIndexMap[i];
+        if (job_count_per_box_[loc] == 0) {
+          update_conservatively(K, i, dir);
+        }
       }
     }
 
-    //     ampi::openmp_scheduler work_scheduler{};
+    ///////////////////////////////////////////////////////////////////////
+    //                                       Do time integration from recvs
+    const int N_rcvs = cmd.m_RcvTags->size();
+    if (N_rcvs > 0)
+    {
+   
+    handler.recv.stats.resize(handler.recv.request.size());
+    int do_N_rcvs = N_rcvs;
+    do {
+      std::vector<int> out_to_i(N_rcvs);
+      int out_count = 0;
+      MPI_Waitsome(N_rcvs, handler.recv.request.data(), &out_count, out_to_i.data(), handler.recv.stats.data());
+      do_N_rcvs -= out_count;
 
-    // #pragma omp parallel
-    //     {
-    // #pragma omp single
-    //       unifex::sync_wait(unifex::bulk_join(unifex::bulk_transform(
-    //           unifex::bulk_schedule(work_scheduler, states.local_size()),
-    //           [&, this](std::size_t i) {
-    //             int K = states.IndexArray()[i];
-    //             BoxList boxes(states[K].box(), IntVect{1024000, 16, 8});
-    //             for (const Box& tilebox : boxes) {
-    // #pragma omp task firstprivate(tilebox, K)
-    //               {
-    //                 auto advance_dir = [&](Direction dir) {
-    //                   const auto dir_v = std::size_t(dir);
-    //                   auto csarray = states.const_array(K);
-    //                   auto farray = fluxes[dir_v].array(K);
-    //                   const Box faces =
-    //                       grow(convert(tilebox, IntVect::TheDimensionVector(dir_v)), dir, -1);
-    //                   ComputeNumericFluxes(faces, farray, csarray, dir);
-    //                   auto cfarray = fluxes[dir_v].const_array(K);
-    //                   auto sarray = states.array(K);
-    //                   const Box inner_box = enclosedCells(faces);
-    //                   UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
-    //                 };
-    //                 // first order accurate operator splitting
-    //                 advance_dir(Direction::x);
-    //                 advance_dir(Direction::y);
-    //                 advance_dir(Direction::z);
-    //               }
-    //             }
-    //           },
-    //           unifex::par_unseq)));
-    //     }
+      #pragma omp parallel for
+      for (int out = 0; out < out_count; ++out) {
+        const int ircv = out_to_i[ircv];
+        const char* dptr = handler.recv.data[ircv];
+        auto const& cctc = *handler.recv.cctc[ircv];
+        for (auto const& tag : cctc) {
+            auto const& dfab = states.array(tag.dstIndex);
+            auto const& sfab = amrex::makeArray4((Real const*)(dptr), tag.sbox, components.n_components);
+            amrex::LoopConcurrentOnCpu(tag.dbox, components.n_components, [=](int i, int j, int k, int n) noexcept {
+                dfab(i,j,k,components.dest_component+n) = sfab(i,j,k,n);
+            });
+            dptr += tag.sbox.numPts() * components.n_components * sizeof(Real);
+            AMREX_ASSERT(dptr <= handler.recv.data[ircv] + handler.recv.size[ircv]);
+        }
+      }
 
-    // #ifdef AMREX_USE_OMP
-    // #  pragma omp parallel if (Gpu::notInLaunchRegion())
-    // #endif
-    //     for (MFIter mfi(states, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-    //       const Box tilebox = mfi.growntilebox();
-    //       auto advance_dir = [&](Direction dir) {
-    //         const auto dir_v = std::size_t(dir);
-    //         auto csarray = states.const_array(mfi);
-    //         auto farray = fluxes[dir_v].array(mfi);
-    //         const Box faces = grow(convert(tilebox, IntVect::TheDimensionVector(dir_v)), dir,
-    //         -1); ComputeNumericFluxes(faces, farray, csarray, dir); auto cfarray =
-    //         fluxes[dir_v].const_array(mfi); auto sarray = states.array(mfi); const Box inner_box
-    //         = enclosedCells(faces); UpdateConservatively(inner_box, sarray, farray,
-    //         dt_over_dx[dir_v], dir);
-    //       };
-    //       advance_dir(Direction::x);
-    //       advance_dir(Direction::y);
-    //       advance_dir(Direction::z);
-    //     }
+      std::vector<int> ready_local_indices;
+      for (int out = 0; out < out_count; ++out) {
+        const int ircv = out_to_i[ircv];
+        auto const& cctc = *handler.recv.cctc[ircv];
+        for (auto const& tag : cctc) {
+          const int loc = states.localindex(tag.dstIndex);
+          if (job_count_per_box_[loc] == 1) {
+            ready_local_indices.push_back(loc);
+          }
+          job_count_per_box_[loc] -= 1;
+        }
+      }
+      std::sort(ready_local_indices.begin(), ready_local_indices.end());
+      
+      for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+        #pragma omp parallel for
+        for (int i = 0; i < ntiles; ++i) {
+          const int K = tiles->indexMap[i];
+          const int loc = tiles->localIndexMap[i];
+          auto it = std::lower_bound(ready_local_indices.begin(), ready_local_indices.end(), loc);
+          if (it != ready_local_indices.end()) {
+            compute_fluxes(K, i, dir);
+          }
+        }
+        #pragma omp parallel for
+        for (int i = 0; i < ntiles; ++i) {
+          const int K = tiles->indexMap[i];
+          const int loc = tiles->localIndexMap[i];
+          auto it = std::lower_bound(ready_local_indices.begin(), ready_local_indices.end(), loc);
+          if (it != ready_local_indices.end()) {
+            update_conservatively(K, i, dir);
+          }
+        }
+      }
+    } while (do_N_rcvs > 0);
+   
+    }
+
+    const int N_snds = cmd.m_SndTags->size();
+    if (N_snds > 0) {
+        handler.send.stats.resize(handler.send.request.size());
+        ParallelDescriptor::Waitall(handler.send.request, handler.send.stats);
+    }
   }
 
 private:
@@ -516,7 +528,7 @@ void my_main() {
   EulerEquation equation{1.4};
 
   AmrInfo info{};
-  info.max_grid_size[0] = IntVect(64);
+  info.max_grid_size[0] = IntVect(32);
   EulerAmrCore core(equation, geom, info);
   // WritePlotfiles(core, 0.0, 0);
 

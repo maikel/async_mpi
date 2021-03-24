@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(AsyncMPI CXX C Fortran)
 
 find_package(MPI REQUIRED C CXX)
-find_package(TBB REQUIRED)
+#find_package(TBB REQUIRED)
 find_package(unifex REQUIRED)
 find_package(AMReX REQUIRED)
 
@@ -22,7 +22,7 @@ target_sources(AsyncMPI
 target_include_directories(AsyncMPI INTERFACE 
                           $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/>
                           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/include/>)
-target_link_libraries(AsyncMPI INTERFACE unifex::unifex MPI::MPI_C MPI::MPI_CXX TBB::tbb)
+target_link_libraries(AsyncMPI INTERFACE unifex::unifex MPI::MPI_C MPI::MPI_CXX)
 if (AMReX_FOUND)
   target_link_libraries(AsyncMPI INTERFACE AMReX::amrex)
 endif()

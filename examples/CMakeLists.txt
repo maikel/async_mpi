@@ -1,5 +1,7 @@
-add_executable(for_each for_each.cpp) 
-target_link_libraries(for_each PRIVATE AsyncMPI)
+if (TBB_FOUND)
+  add_executable(for_each for_each.cpp) 
+  target_link_libraries(for_each PRIVATE AsyncMPI)
+endif()
 
 add_executable(bulk_finally bulk_finally.cpp) 
 target_link_libraries(bulk_finally PRIVATE AsyncMPI)
