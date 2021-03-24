@@ -87,7 +87,7 @@ inline sender openmp_scheduler::schedule() const noexcept {
   return sender{};
 }
 
-inline many_sender tag_invoke(unifex::tag_t<unifex::bulk_schedule>, const openmp_scheduler& s, std::size_t n)
+inline many_sender tag_invoke(unifex::tag_t<unifex::bulk_schedule>, const openmp_scheduler&, std::size_t n)
 {
   return many_sender{n};
 }

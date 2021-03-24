@@ -78,25 +78,21 @@ public:
 #  pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
     for (MFIter mfi(states, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-      Array4<Real> rho = states.array(mfi, RHO);
-      Array4<Real> rhou = states.array(mfi, RHOU);
-      Array4<Real> rhov = states.array(mfi, RHOV);
-      Array4<Real> rhow = states.array(mfi, RHOW);
-      Array4<Real> rhoE = states.array(mfi, RHOE);
-      amrex::ParallelFor(mfi.tilebox(), [=, this] AMREX_GPU_DEVICE(int i, int j, int k) {
+      Array4<Real> cons = states.array(mfi);
+      amrex::ParallelFor(mfi.tilebox(), [&] AMREX_GPU_DEVICE(int i, int j, int k) {
         Real x[] = {AMREX_D_DECL(
             problo[0] + (0.5 + i) * dx[0],
             problo[1] + (0.5 + j) * dx[1],
             problo[2] + (0.5 + k) * dx[2])};
-        const double r2 = AMREX_D_TERM(x[0] * x[0], +x[1] * x[1], +x[2] * x[2]);
-        constexpr double R = 0.1 * 0.1;
-        rho(i, j, k) = 1.0;
-        rhou(i, j, k) = 0.0;
-        rhov(i, j, k) = 0.0;
-        rhow(i, j, k) = 0.0;
+        // const double r2 = AMREX_D_TERM(x[0] * x[0], +x[1] * x[1], +x[2] * x[2]);
+        // constexpr double R = 0.1 * 0.1;
+        cons(i, j, k, RHO) = 1.0;
+        cons(i, j, k, RHOU) = 0.0;
+        cons(i, j, k, RHOV) = 0.0;
+        cons(i, j, k, RHOW) = 0.0;
         constexpr double p1 = 10.0;
         constexpr double p2 = 1.0;
-        rhoE(i, j, k) = x[0] < 0.0 ? equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p1)
+        cons(i, j, k, RHOE) = x[0] < 0.0 ? equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p1)
                                    : equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p2);
       });
     }
@@ -118,7 +114,7 @@ public:
         const Real w = rhow / rho;
         const Real p = equation.Pressure(rho, rhou, rhov, rhow, rhoE);
         const Real a = std::sqrt(equation.gamma * p / rho);
-        const Real abs_a = std::abs(a);
+        // const Real abs_a = std::abs(a);
         max_s = std::max(max_s, std::max({std::abs(u), std::abs(v), std::abs(w)}) + std::abs(a));
       });
       return max_s;
@@ -222,7 +218,7 @@ public:
 #  pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
       for (MFIter mfi(fluxes[dir], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const Box tilebox = mfi.nodaltilebox(dir);
+        const Box tilebox = mfi.grownnodaltilebox(dir, fluxes[dir].nGrowVect());
         auto farray = fluxes[dir].array(mfi);
         auto csarray = states.const_array(mfi);
         ComputeNumericFluxes(tilebox, farray, csarray, Direction(dir));
@@ -231,7 +227,7 @@ public:
 #  pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
       for (MFIter mfi(states, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const Box tilebox = grow(mfi.growntilebox(), dir, -1);
+        const Box tilebox = enclosedCells(mfi.grownnodaltilebox(dir, fluxes[dir].nGrowVect()));
         auto cfarray = fluxes[dir].const_array(mfi);
         auto sarray = states.array(mfi);
         UpdateConservatively(tilebox, sarray, cfarray, dt_over_dx[dir], Direction(dir));
@@ -240,7 +236,7 @@ public:
   }
 
 private:
-  void ErrorEst(int level, ::amrex::TagBoxArray& tags, Real time_point, int /* ngrow */) override {
+  void ErrorEst(int, ::amrex::TagBoxArray&, Real, int /* ngrow */) override {
     throw std::runtime_error("For simplicity, this example supports only one level.");
   }
 
@@ -264,18 +260,18 @@ private:
   }
 
   void MakeNewLevelFromCoarse(
-      int level,
-      double time_point,
-      const ::amrex::BoxArray& box_array,
-      const ::amrex::DistributionMapping& distribution_mapping) override {
+      int,
+      double,
+      const ::amrex::BoxArray&,
+      const ::amrex::DistributionMapping&) override {
     throw std::runtime_error("For simplicity, this example supports only one level.");
   }
 
   void RemakeLevel(
-      int level,
-      double time_point,
-      const ::amrex::BoxArray& box_array,
-      const ::amrex::DistributionMapping& distribution_mapping) override {
+      int,
+      double,
+      const ::amrex::BoxArray&,
+      const ::amrex::DistributionMapping&) override {
     throw std::runtime_error("For simplicity, this example supports only one level.");
   }
 
@@ -293,7 +289,7 @@ private:
 void WritePlotfiles(const EulerAmrCore& core, double time_point, int step) {
   static const Vector<std::string> varnames{
       "Density", "Momentum_X", "Momentum_Y", "Momentum_Z", "TotalEnergy"};
-  int nlevels = 1;
+  // int nlevels = 1;
   std::array<char, 256> x_pbuffer{};
   snprintf(x_pbuffer.data(), x_pbuffer.size(), "AsyncEuler/plt%09d", step);
   std::string plotfilename{x_pbuffer.data()};
