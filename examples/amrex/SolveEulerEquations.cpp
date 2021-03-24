@@ -23,6 +23,8 @@
 #include <AMReX_MultiFab.H>
 #include <AMReX_PlotFileUtil.H>
 
+#include <unistd.h>
+
 using namespace amrex;
 
 enum Dims { ix, iy, iz };
@@ -398,7 +400,7 @@ public:
 
       #pragma omp parallel for
       for (int out = 0; out < out_count; ++out) {
-        const int ircv = out_to_i[ircv];
+        const int ircv = out_to_i[out];
         const char* dptr = handler.recv.data[ircv];
         auto const& cctc = *handler.recv.cctc[ircv];
         for (auto const& tag : cctc) {
@@ -414,7 +416,7 @@ public:
 
       std::vector<int> ready_local_indices;
       for (int out = 0; out < out_count; ++out) {
-        const int ircv = out_to_i[ircv];
+        const int ircv = out_to_i[out];
         auto const& cctc = *handler.recv.cctc[ircv];
         for (auto const& tag : cctc) {
           const int loc = states.localindex(tag.dstIndex);
