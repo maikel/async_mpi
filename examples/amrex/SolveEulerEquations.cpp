@@ -403,7 +403,7 @@ public:
         auto const& cctc = *handler.recv.cctc[ircv];
         for (auto const& tag : cctc) {
             auto const& dfab = states.array(tag.dstIndex);
-            auto const& sfab = amrex::makeArray4((Real const*)(dptr), tag.sbox, components.n_components);
+            auto const& sfab = amrex::makeArray4((Real const*)(dptr), tag.dbox, components.n_components);
             amrex::LoopConcurrentOnCpu(tag.dbox, components.n_components, [=](int i, int j, int k, int n) noexcept {
                 dfab(i,j,k,components.dest_component+n) = sfab(i,j,k,n);
             });
