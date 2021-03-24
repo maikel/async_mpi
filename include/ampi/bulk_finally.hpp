@@ -172,12 +172,13 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::enqueue_con
     operation(Continuation&& s, ForwardResultToManyReceiver&& r) noexcept
       : operation_base()
       , op{unifex::connect(std::move(s), std::move(r))} {}
+    virtual ~operation() = default;
     unifex::connect_result_t<Continuation, ForwardResultToManyReceiver> op;
     void start() & noexcept { op.start(); }
   };
   using OpAllocator = rebind_alloc_t<unifex::get_allocator_t<ManyReceiver>, operation>;
   OpAllocator allocator = rebind_alloc<operation>(get_allocator());
-  auto cont_op = std::allocator_traits<OpAllocator>::allocate(allocator, 1);
+  operation* cont_op = std::allocator_traits<OpAllocator>::allocate(allocator, 1);
   // check if the queue will deplete as we currently arrive
   std::size_t old_count = n_active_operations.load(std::memory_order_relaxed);
   std::size_t new_count = old_count + 1;
@@ -218,7 +219,7 @@ void operation_state<SourceManySender, SenderFactory, ManyReceiver>::finalize() 
 template <typename SourceManySender, typename SenderFactory, typename ManyReceiver>
 void operation_state<SourceManySender, SenderFactory, ManyReceiver>::
     decrease_operation_count_and_finalize_if_last() noexcept {
-  std::size_t count = n_active_operations.fetch_sub(1, std::memory_order_release);
+  std::size_t count = n_active_operations.fetch_sub(1);
   if (count == 1) {
     finalize();
   }

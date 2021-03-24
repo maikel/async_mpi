@@ -73,7 +73,7 @@ template <typename FAB, typename Receiver>
 void NotifyReadyBox(CopyOpBase<FAB, Receiver>& op, int i) {
   const int local_index = op.fa_->localindex(i);
   const int old_box_count =
-      op.job_count_per_box_[local_index].fetch_sub(1, std::memory_order_acquire);
+      op.job_count_per_box_[local_index].fetch_sub(1, std::memory_order_relaxed);
   // we are the last job for this box
   if (old_box_count == 1) {
     unifex::set_next(op.receiver_, i, (*op.fa_)[i].box());
@@ -86,19 +86,23 @@ auto LocalCopies(CopyOpBase<FAB, Receiver>& op) {
   return unifex::bulk_join(unifex::bulk_transform(
       unifex::bulk_schedule(scheduler, op.meta_data_->m_LocTags->size()),
       [&op](std::size_t i) {
-        auto& local_tags = *op.meta_data_->m_LocTags;
-        const FabArrayBase::CopyComTag& tag = local_tags[i];
-        FabArray<FAB>& fa = *op.fa_;
-        const FAB& src = fa[tag.srcIndex];
-        FAB& dest = fa[tag.dstIndex];
-        dest.template copy<RunOn::Host>(
-            src,
-            tag.sbox,
-            op.components_.src_component,
-            tag.dbox,
-            op.components_.dest_component,
-            op.components_.n_components);
-        NotifyReadyBox(op, tag.dstIndex);
+        if (op.meta_data_->m_threadsafe_loc) {
+          auto& local_tags = *op.meta_data_->m_LocTags;
+          const FabArrayBase::CopyComTag& tag = local_tags[i];
+          FabArray<FAB>& fa = *op.fa_;
+          const FAB& src = fa[tag.srcIndex];
+          FAB& dest = fa[tag.dstIndex];
+          dest.template copy<RunOn::Host>(
+              src,
+              tag.sbox,
+              op.components_.src_component,
+              tag.dbox,
+              op.components_.dest_component,
+              op.components_.n_components);
+          NotifyReadyBox(op, tag.dstIndex); 
+        } else {
+          MPI_Abort(amrex::ParallelDescriptor::Communicator(), 1);
+        }
       },
       unifex::par_unseq));
 }

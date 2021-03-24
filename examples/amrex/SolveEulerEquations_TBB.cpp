@@ -1,10 +1,26 @@
+#include <ampi/amrex/FillBoundary.hpp>
+
+#include <ampi/bulk_sequence.hpp>
+#include <ampi/for_each.hpp>
+#include <ampi/bulk_on.hpp>
+#include <ampi/tbb_task_scheduler.hpp>
+
+#include <ampi/amrex/ReduceMax.hpp>
+
+#include <unifex/single_thread_context.hpp>
+#include <unifex/bulk_join.hpp>
+#include <unifex/bulk_transform.hpp>
+#include <unifex/sync_wait.hpp>
+#include <unifex/static_thread_pool.hpp>
+
+#include <ranges>
+
+#include <AMReX_NonLocalBC.H>
+
 #include <AMReX.H>
 #include <AMReX_AmrCore.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_PlotFileUtil.H>
-// #include <AMReX_NonLocalBC.H>
-
-#include <unifex/scope_guard.hpp>
 
 using namespace amrex;
 
@@ -58,6 +74,10 @@ public:
   enum { coarsest_level };
   enum { RHO, RHOU, RHOV, RHOW, RHOE, n_components };
 
+  tbb::task_arena arena{5};
+  unifex::single_thread_context stc{};
+  // unifex::static_thread_pool communication_thread_pool{2};
+
   MultiFab states{};
   std::array<MultiFab, AMREX_SPACEDIM> fluxes{};
 
@@ -96,13 +116,41 @@ public:
         rhow(i, j, k) = 0.0;
         constexpr double p1 = 10.0;
         constexpr double p2 = 1.0;
-        rhoE(i, j, k) = x[0] < 0.0 ? equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p1)
-                                   : equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p2);
+        rhoE(i, j, k) = r2 < R ? equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p1)
+                               : equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p2);
       });
     }
   }
 
-  Real ComputeStableDt() {
+  // Real ComputeStableDt() {
+  //   ampi::tbb_task_scheduler work_scheduler(arena);
+  //   // auto work_scheduler = stc.get_scheduler();
+  //   Real max_s = ampi::reduce_max(work_scheduler, states, [&](const Box& box, int K) {
+  //     Array4<const Real> cons = states.const_array(K);
+  //     Real max_s = 0.0;
+  //     LoopConcurrentOnCpu(box, [&](int i, int j, int k) {
+  //       const Real rho = cons(i, j, k, RHO);
+  //       const Real rhou = cons(i, j, k, RHOU);
+  //       const Real rhov = cons(i, j, k, RHOV);
+  //       const Real rhow = cons(i, j, k, RHOW);
+  //       const Real rhoE = cons(i, j, k, RHOE);
+  //       const Real u = rhou / rho;
+  //       const Real v = rhov / rho;
+  //       const Real w = rhow / rho;
+  //       const Real p = equation.Pressure(rho, rhou, rhov, rhow, rhoE);
+  //       const Real a = std::sqrt(equation.gamma * p / rho);
+  //       const Real abs_a = std::abs(a);
+  //       max_s = std::max(max_s, std::max({std::abs(u), std::abs(v), std::abs(w)}) + std::abs(a));
+  //     });
+  //     return max_s;
+  //   });
+  //   ParallelAllReduce::Max(max_s, ParallelDescriptor::Communicator());
+  //   const Geometry& geom = Geom(coarsest_level);
+  //   const Real dx = std::min({geom.CellSize(0), geom.CellSize(1), geom.CellSize(2)});
+  //   return max_s > 0.0 ? dx / max_s : std::numeric_limits<Real>::max();
+  // }
+
+    Real ComputeStableDt() {
     // auto work_scheduler = stc.get_scheduler();
     Real max_s = ReduceMax(states, IntVect{}, [&](const Box& box, Array4<const Real> cons) {
       // Array4<const Real> cons = states.const_array(K);
@@ -166,8 +214,7 @@ public:
       };
       const Real roeU[3] = {Roe(uL[0], uR[0]), Roe(uL[1], uR[1]), Roe(uL[2], uR[2])};
       const Real roeH = Roe(hL, hR);
-      const Real roeA2 =
-          equation.gm1 * (roeH - 0.5 * (roeU[0] * roeU[0] + roeU[1] * roeU[1] + roeU[2] * roeU[2]));
+      const Real roeA2 = equation.gm1 * (roeH - 0.5 * (roeU[0] * roeU[0] + roeU[1] * roeU[1] + roeU[2]*roeU[2]));
       const Real roeA = std::sqrt(roeA2);
       const Real maxA = std::max(aL, aR);
       // Compute Signal velocities
@@ -182,7 +229,7 @@ public:
       const Real sR = std::max(sR1, sR2);
       const Real bL = std::min(sL, 0.0);
       const Real bR = std::max(sR, 0.0);
-      const Real bLbR = bL * bR;
+      const Real bLbR = bL*bR;
       const Real db = bR - bL;
       const Real db_positive_inv = db <= 0 ? 1.0 : 1.0 / db;
       // Compute approximative HLLE flux
@@ -214,29 +261,40 @@ public:
   }
 
   void AdvanceTime(Real dt) {
-    states.FillBoundary(Geom(coarsest_level).periodicity());
     const Real* dx = Geom(coarsest_level).CellSize();
     const Real dt_over_dx[AMREX_SPACEDIM] = {AMREX_D_DECL(dt / dx[0], dt / dx[1], dt / dx[2])};
-    for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
-#ifdef AMREX_USE_OMP
-#  pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-      for (MFIter mfi(fluxes[dir], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const Box tilebox = mfi.nodaltilebox(dir);
-        auto farray = fluxes[dir].array(mfi);
-        auto csarray = states.const_array(mfi);
-        ComputeNumericFluxes(tilebox, farray, csarray, Direction(dir));
-      }
-#ifdef AMREX_USE_OMP
-#  pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-      for (MFIter mfi(states, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const Box tilebox = mfi.tilebox();
-        auto cfarray = fluxes[dir].const_array(mfi);
-        auto sarray = states.array(mfi);
-        UpdateConservatively(tilebox, sarray, cfarray, dt_over_dx[dir], Direction(dir));
-      }
-    }
+    auto advance = unifex::bulk_join(unifex::bulk_transform(
+        // work_scheduler to schedule work items and comm_scheduler to schedule MPI_WaitAny/All
+        // threads
+        FillBoundary_async(states, Geom(coarsest_level).periodicity()),
+        [this, dt_over_dx](int K, const Box& box) {
+          auto advance_dir = [&](Direction dir) {
+            const auto dir_v = std::size_t(dir);
+            auto csarray = states.const_array(K);
+            auto farray = fluxes[dir_v].array(K);
+            const Box faces = grow(convert(box, IntVect::TheDimensionVector(dir_v)), dir, -1);
+            ComputeNumericFluxes(faces, farray, csarray, dir);
+            auto cfarray = fluxes[dir_v].const_array(K);
+            auto sarray = states.array(K);
+            const Box inner_box = enclosedCells(faces);
+            UpdateConservatively(inner_box, sarray, farray, dt_over_dx[dir_v], dir);
+          };
+          // first order accurate operator splitting
+          advance_dir(Direction::x);
+          advance_dir(Direction::y);
+          advance_dir(Direction::z);
+        },
+        unifex::par_unseq));
+    // wait here until the above is done for all boxes
+    ampi::tbb_task_scheduler work_scheduler(arena);
+    // ampi::openmp_scheduler work_scheduler{};
+    // auto work_scheduler = stc.get_scheduler();
+    // auto comm_scheduler = communication_thread_pool.get_scheduler();
+    auto comm_scheduler = stc.get_scheduler();
+    unifex::sync_wait(unifex::with_query_value(
+        unifex::with_query_value(std::move(advance), unifex::get_scheduler, work_scheduler),
+        ampi::get_comm_scheduler,
+        comm_scheduler));
   }
 
 private:
@@ -290,14 +348,14 @@ private:
   }
 };
 
-void WritePlotfiles(const EulerAmrCore& core, double time_point, int step) {
-  static const Vector<std::string> varnames{
-      "Density", "Momentum_X", "Momentum_Y", "Momentum_Z", "TotalEnergy"};
-  int nlevels = 1;
-  std::array<char, 256> x_pbuffer{};
-  snprintf(x_pbuffer.data(), x_pbuffer.size(), "AsyncEuler/plt%09d", step);
-  std::string plotfilename{x_pbuffer.data()};
-  WriteSingleLevelPlotfile(plotfilename, core.states, varnames, core.Geom(0), time_point, step);
+void WritePlotfiles(const EulerAmrCore& core, double time_point, int step)
+{
+    static const Vector<std::string> varnames{"Density", "Momentum_X", "Momentum_Y", "Momentum_Z", "TotalEnergy"};
+    int nlevels = 1;
+    std::array<char, 256> x_pbuffer{};
+    snprintf(x_pbuffer.data(), x_pbuffer.size(), "AsyncEuler/plt%09d", step);
+    std::string plotfilename{x_pbuffer.data()};
+    WriteSingleLevelPlotfile(plotfilename, core.states, varnames, core.Geom(0), time_point, step);
 }
 
 void my_main() {
@@ -310,28 +368,24 @@ void my_main() {
   EulerEquation equation{1.4};
 
   AmrInfo info{};
-  info.max_grid_size[0] = IntVect(32);
+  info.max_grid_size[0] = IntVect(64);
   EulerAmrCore core(equation, geom, info);
-  // WritePlotfiles(core, 0.0, 0);
+  //WritePlotfiles(core, 0.0, 0);
 
-  double t = 0.0;
+  double t = 0.0; 
   int steps = 0;
-
-  while (t < 1.0 && steps < 50) {
-    double dt = 0.3 * core.ComputeStableDt();
+  
+  while (t < 1.0) {
     auto start = std::chrono::steady_clock::now();
+    double dt = 0.3 * core.ComputeStableDt();
     core.AdvanceTime(dt);
     auto stop = std::chrono::steady_clock::now();
-    std::chrono::nanoseconds diff_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-    std::chrono::microseconds diff_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-    std::chrono::milliseconds diff_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
+    std::chrono::nanoseconds diff_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+    std::chrono::microseconds diff_us = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    std::chrono::milliseconds diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
     t += dt;
     steps += 1;
-    Print() << "[" << diff_ns.count() << "ns : " << diff_us.count() << "us : " << diff_ms.count()
-            << "ms] t: " << t << ", step: " << steps << '\n';
+    Print() << "[" << diff_ns.count() << "ns : " << diff_us.count() << "us : " <<  diff_ms.count() << "ms] t: " << t << '\n';
     // WritePlotfiles(core, t, steps);
   }
 }
