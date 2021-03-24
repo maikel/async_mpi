@@ -2,7 +2,7 @@
 
 # Asynchronous Communication and Computation
 
-This library wraps the blocking communication procudure `amrex::FillBoundary` in an internal `MPI_WaitAny` loop that allows asynchronous dispatch with concepts found in [libunifex](https://github.com/facebookexperimental/libunifex).
+This library wraps the blocking communication procudure `amrex::FillBoundary` in an internal `MPI_Waitsome` loop that allows asynchronous dispatch with concepts found in [libunifex](https://github.com/facebookexperimental/libunifex).
 Consider a blocking call to `FillBoundary` as in:
 
 ```cpp
