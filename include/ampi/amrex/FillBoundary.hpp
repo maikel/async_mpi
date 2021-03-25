@@ -13,6 +13,10 @@
 #include <unifex/bulk_join.hpp>
 #include <unifex/transform.hpp>
 #include <unifex/when_all.hpp>
+#include <unifex/blocking.hpp>
+#include <unifex/sync_wait.hpp>
+
+#include <unifex/sender_concepts.hpp>
 
 #include <unifex/finally.hpp>
 
@@ -99,7 +103,7 @@ auto LocalCopies(CopyOpBase<FAB, Receiver>& op) {
               tag.dbox,
               op.components_.dest_component,
               op.components_.n_components);
-          NotifyReadyBox(op, tag.dstIndex); 
+          NotifyReadyBox(op, tag.dstIndex);
         } else {
           MPI_Abort(amrex::ParallelDescriptor::Communicator(), 1);
         }
@@ -250,13 +254,213 @@ inline constexpr struct fn {
 using fill_boundary_finish_::FillBoundary_finish;
 
 template <typename FAB>
-auto FillBoundary_async(FabArray<FAB>& fa, const Periodicity& period)
-{
-  NonLocalBC::PackComponents components{.dest_component = 0, .src_component = 0, .n_components = fa.nComp()};
+auto FillBoundary_async(FabArray<FAB>& fa, const Periodicity& period) {
+  NonLocalBC::PackComponents components{
+      .dest_component = 0, .src_component = 0, .n_components = fa.nComp()};
   // Get comm meta data from amrex
   const FabArrayBase::FB& cmd = fa.getFB(fa.nGrowVect(), period, false, false);
   auto handler = FillBoundary_nowait(fa, cmd, components);
   return FillBoundary_finish(fa, std::move(handler), cmd, components);
 }
+
+namespace fill_boundary_stream {
+template <typename FAB>
+struct Sender;
+
+template <typename FAB>
+struct CleanupSender;
+
+template <typename FAB>
+struct Stream {
+  static_assert(IsBaseFab<FAB>::value);
+  enum class State : unsigned char { local, recv, sends };
+  State state_ = State::local;
+  FabArray<FAB>* fa_;
+  const FabArrayBase::FB* cmd_;
+  NonLocalBC::PackComponents components_;
+  NonLocalBC::CommHandler handler_;
+  IntVect tilesize_;
+  std::vector<int> job_count_per_box_;
+
+  Stream(FabArray<FAB>& fa, const Periodicity& period)
+    : fa_{&fa}
+    , cmd_{&fa.getFB(fa.nGrowVect(), period)}
+    , components_{0, 0, fa.nComp()}
+    , handler_{NonLocalBC::ParallelCopy_nowait(
+          NonLocalBC::no_local_copy, fa, fa, *cmd_, components_)}
+    , tilesize_{FabArrayBase::mfiter_tile_size}
+    , job_count_per_box_(fa.local_size()) {
+    // count jobs per box that depend on MPI receives
+    for (auto [from, tags] : *cmd_->m_RcvTags) {
+      for (const FabArrayBase::CopyComTag& tag : tags) {
+        const int i = fa.localindex(tag.dstIndex);
+        job_count_per_box_[i] += 1;
+      }
+    }
+  }
+
+  Sender<FAB> next() noexcept;
+
+  CleanupSender<FAB> cleanup() noexcept;
+};
+
+template <typename FAB, typename Receiver>
+struct Operation {
+  Stream<FAB>* stream_;
+  Receiver receiver_;
+
+  FabArray<FAB>& fa() noexcept { return *stream_->fa_; }
+
+  const FabArrayBase::FB& cmd() const noexcept { return *stream_->cmd_; }
+
+  const NonLocalBC::PackComponents& components() const noexcept { return stream_->components_; }
+
+  bool do_local_copies() {
+    const int N_locs = stream_->cmd_->m_LocTags->size();
+    if (N_locs == 0) {
+      return false;
+    }
+    // auto scheduler = unifex::get_scheduler(receiver_);
+    // unifex::sync_wait(unifex::bulk_join(unifex::bulk_transform(
+    //     unifex::bulk_schedule(scheduler, N_locs),
+    //     [&](int i) {
+#ifdef _OPENMP
+#  pragma omp parallel for
+#endif
+    for (int i = 0; i < N_locs; ++i) {
+          const auto& tag = (*cmd().m_LocTags)[i];
+          const FAB& src = fa()[tag.srcIndex];
+          FAB& dest = fa()[tag.dstIndex];
+          dest.template copy<RunOn::Host>(
+              src,
+              tag.sbox,
+              components().src_component,
+              tag.dbox,
+              components().dest_component,
+              components().n_components);
+        // },
+        // unifex::par_unseq)));
+    }
+    return true;
+  }
+
+  std::vector<int> get_ready_tiles(const FabArrayBase::TileArray* tiles) {
+    const int ntiles = tiles->numLocalTiles[0];
+    std::vector<int> ready_tiles{};
+    std::size_t local_size = stream_->job_count_per_box_.size();
+    ready_tiles.reserve(local_size * ntiles);
+    for (std::size_t i = 0; i < local_size; ++i) {
+      if (stream_->job_count_per_box_[i] == 0) {
+        // Get tile indices
+        auto first =
+            std::lower_bound(tiles->localIndexMap.begin(), tiles->localIndexMap.end(), int(i));
+        const auto t0 = first - tiles->localIndexMap.begin();
+        const int n = tiles->numLocalTiles[t0];
+        for (int t = t0; t < t0 + n; ++t) {
+          ready_tiles.push_back(t);
+        }
+        stream_->job_count_per_box_[i] = -1;
+      }
+    }
+    return ready_tiles;
+  }
+
+  void start() & noexcept {
+    try {
+      if (stream_->state_ == Stream<FAB>::State::local) {
+        if (do_local_copies()) {
+          stream_->state_ = Stream<FAB>::State::recv;
+          const FabArrayBase::TileArray* tiles = fa().getTileArray(stream_->tilesize_);
+          std::vector<int> ready_tiles = get_ready_tiles(tiles);
+          unifex::set_value(std::move(receiver_), ready_tiles, tiles);
+          return;
+        }
+      }
+      unifex::set_done(std::move(receiver_));
+    } catch (...) {
+      unifex::set_error(std::move(receiver_), std::current_exception());
+    }
+  }
+};
+
+template <typename FAB>
+struct Sender {
+public:
+  template <template <typename...> class Variant, template <typename...> class Tuple>
+  using value_types = Variant<Tuple<std::vector<int>, const FabArrayBase::TileArray*>>;
+
+  template <template <typename...> class Variant>
+  using error_types = Variant<std::exception_ptr>;
+
+  static constexpr bool sends_done = true;
+
+  Stream<FAB>* stream_;
+
+  template <typename Receiver>
+  Operation<FAB, std::remove_cvref_t<Receiver>> connect(Receiver&& r) noexcept {
+    return {stream_, std::move(r)};
+  }
+
+private:
+  friend constexpr unifex::blocking_kind
+  tag_invoke(unifex::tag_t<unifex::blocking>, const Sender<FAB>& s) noexcept {
+    return unifex::blocking_kind::always_inline;
+  }
+};
+
+template <typename FAB, typename Receiver>
+struct CleanupOperation {
+  Stream<FAB>* stream_;
+  Receiver receiver_;
+
+  void start() noexcept {
+    unifex::set_done(std::move(receiver_));
+  }
+};
+
+template <typename FAB>
+struct CleanupSender {
+public:
+  template <template <typename...> class Variant, template <typename...> class Tuple>
+  using value_types = Variant<Tuple<>>;
+
+  template <template <typename...> class Variant>
+  using error_types = Variant<std::exception_ptr>;
+
+  static constexpr bool sends_done = true;
+
+  Stream<FAB>* stream_;
+
+  template <typename Receiver>
+  CleanupOperation<FAB, std::remove_cvref_t<Receiver>> connect(Receiver&& r) noexcept {
+    return {stream_, std::move(r)};
+  }
+
+private:
+  friend constexpr unifex::blocking_kind
+  tag_invoke(unifex::tag_t<unifex::blocking>, const CleanupSender<FAB>& s) noexcept {
+    return unifex::blocking_kind::always_inline;
+  }
+};
+
+template <typename FAB>
+Sender<FAB> Stream<FAB>::next() noexcept {
+  return Sender<FAB>{this};
+}
+
+template <typename FAB>
+CleanupSender<FAB> Stream<FAB>::cleanup() noexcept {
+  return CleanupSender<FAB>{this};
+}
+constexpr inline struct fn {
+  template <typename FAB>
+  auto operator()(FabArray<FAB>& fa, const Periodicity& period) const {
+    return Stream<FAB>(fa, period);
+  }
+} FillBoundary_stream;
+
+}  // namespace fill_boundary_stream
+
+using fill_boundary_stream::FillBoundary_stream;
 
 }  // namespace amrex

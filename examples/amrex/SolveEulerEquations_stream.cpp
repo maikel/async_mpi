@@ -1,9 +1,19 @@
+#include <ampi/amrex/FillBoundary.hpp>
+
+#include <unifex/scope_guard.hpp>
+#include <unifex/for_each.hpp>
+#include <unifex/sync_wait.hpp>
+
+#include <ranges>
+
+#include <AMReX_NonLocalBC.H>
+
 #include <AMReX.H>
 #include <AMReX_AmrCore.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_PlotFileUtil.H>
 
-#include <unifex/scope_guard.hpp>
+#include <unistd.h>
 
 using namespace amrex;
 
@@ -52,6 +62,63 @@ Dim3 Shift(Dim3 i, Direction dir, int n) noexcept {
   return Dim3{array[0], array[1], array[2]};
 }
 
+Box validbox(const BoxArray& ba, const FabArrayBase::TileArray& ta, int index) {
+  return ba[ta.indexMap[index]];
+}
+
+Box tilebox(
+    const BoxArray& ba,
+    const FabArrayBase::TileArray& ta,
+    int index,
+    const IntVect& nodal = IntVect::TheCellVector()) noexcept {
+  Box bx(ta.tileArray[index]);
+  const IndexType new_typ{nodal};
+  if (!new_typ.cellCentered()) {
+    bx.setType(new_typ);
+    const Box& valid_cc_box = amrex::enclosedCells(validbox(ba, ta, index));
+    const IntVect& Big = valid_cc_box.bigEnd();
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+      if (new_typ.nodeCentered(d)) {  // validbox should also be nodal in d-direction.
+        if (bx.bigEnd(d) == Big[d]) {
+          bx.growHi(d, 1);
+        }
+      }
+    }
+  }
+  return bx;
+}
+
+Box tilebox(
+    const BoxArray& ba,
+    const FabArrayBase::TileArray& ta,
+    int index,
+    const IntVect& nodal,
+    const IntVect& ngrow) noexcept {
+  Box bx = tilebox(ba, ta, index, nodal);
+  const Box& vccbx = validbox(ba, ta, index);
+  for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+    if (bx.smallEnd(d) == vccbx.smallEnd(d)) {
+      bx.growLo(d, ngrow[d]);
+    }
+    if (bx.bigEnd(d) >= vccbx.bigEnd(d)) {
+      bx.growHi(d, ngrow[d]);
+    }
+  }
+  return bx;
+}
+
+Box grownnodaltilebox(
+    const BoxArray& ba,
+    const FabArrayBase::TileArray& ta,
+    int index,
+    int dir,
+    IntVect const& a_ng) noexcept {
+  BL_ASSERT(dir < AMREX_SPACEDIM);
+  if (dir < 0)
+    return tilebox(ba, ta, index, IntVect::TheNodeVector(), a_ng);
+  return tilebox(ba, ta, index, IntVect::TheDimensionVector(dir), a_ng);
+}
+
 class EulerAmrCore : public AmrCore {
 public:
   enum { coarsest_level };
@@ -92,15 +159,13 @@ public:
         constexpr double p1 = 10.0;
         constexpr double p2 = 1.0;
         cons(i, j, k, RHOE) = x[0] < 0.0 ? equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p1)
-                                   : equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p2);
+                                         : equation.TotalEnergy(1.0, 0.0, 0.0, 0.0, p2);
       });
     }
   }
 
   Real ComputeStableDt() {
-    // auto work_scheduler = stc.get_scheduler();
     Real max_s = ReduceMax(states, IntVect{}, [&](const Box& box, Array4<const Real> cons) {
-      // Array4<const Real> cons = states.const_array(K);
       Real max_s = 0.0;
       ParallelFor(box, [&max_s, cons, this] AMREX_GPU_DEVICE(int i, int j, int k) {
         const Real rho = cons(i, j, k, RHO);
@@ -113,7 +178,6 @@ public:
         const Real w = rhow / rho;
         const Real p = equation.Pressure(rho, rhou, rhov, rhow, rhoE);
         const Real a = std::sqrt(equation.gamma * p / rho);
-        // const Real abs_a = std::abs(a);
         max_s = std::max(max_s, std::max({std::abs(u), std::abs(v), std::abs(w)}) + std::abs(a));
       });
       return max_s;
@@ -195,6 +259,21 @@ public:
     });
   }
 
+  void ComputeNumericFluxes(const FabArrayBase::TileArray* tiles, int tile_index, int dir) {
+    const Box face_tilebox = tilebox(
+        states.boxArray(),
+        *tiles,
+        tile_index,
+        IntVect::TheDimensionVector(dir),
+        fluxes[dir].nGrowVect());
+    const int K = tiles->indexMap[tile_index];
+    AMREX_ASSERT(!states[K].contains_nan());
+    auto csarray = states.const_array(K);
+    auto farray = fluxes[dir].array(K);
+    ComputeNumericFluxes(face_tilebox, farray, csarray, Direction(dir));
+    AMREX_ASSERT(!fluxes[dir][K].contains_nan(face_tilebox, 0, n_components));
+  }
+
   void UpdateConservatively(
       const Box& box,
       const Array4<Real>& cons,
@@ -208,30 +287,48 @@ public:
     });
   }
 
+  void UpdateConservatively(const FabArrayBase::TileArray* tiles, int tile_index, double dt_over_dx, int dir) {
+    const Box box = enclosedCells(tilebox(
+        states.boxArray(),
+        *tiles,
+        tile_index,
+        IntVect::TheDimensionVector(dir),
+        fluxes[dir].nGrowVect()));
+    const int K = tiles->indexMap[tile_index];
+    auto sarray = states.array(K);
+    auto cfarray = fluxes[dir].const_array(K);
+    UpdateConservatively(box, sarray, cfarray, dt_over_dx, Direction(dir));
+  }
+
   void AdvanceTime(Real dt) {
-    states.FillBoundary(Geom(coarsest_level).periodicity());
+    // states.FillBoundary(Geom(coarsest_level).periodicity());
     const Real* dx = Geom(coarsest_level).CellSize();
     const Real dt_over_dx[AMREX_SPACEDIM] = {AMREX_D_DECL(dt / dx[0], dt / dx[1], dt / dx[2])};
-    for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
-#ifdef AMREX_USE_OMP
-#  pragma omp parallel if (Gpu::notInLaunchRegion())
+    const FabArrayBase::TileArray* tiles =
+        states.getTileArray(IntVect{FabArrayBase::mfiter_tile_size});
+    const int ntiles = tiles->tileArray.size();
+
+    unifex::sync_wait(unifex::for_each(
+        FillBoundary_stream(states, Geom(coarsest_level).periodicity()),
+        [&](std::vector<int> ready_tiles, const FabArrayBase::TileArray* tiles) {
+          const int ntiles = ready_tiles.size();
+          for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+#ifdef _OPENMP
+#  pragma omp parallel for
 #endif
-      for (MFIter mfi(fluxes[dir], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const Box tilebox = mfi.grownnodaltilebox(dir, fluxes[dir].nGrowVect());
-        auto farray = fluxes[dir].array(mfi);
-        auto csarray = states.const_array(mfi);
-        ComputeNumericFluxes(tilebox, farray, csarray, Direction(dir));
-      }
-#ifdef AMREX_USE_OMP
-#  pragma omp parallel if (Gpu::notInLaunchRegion())
+            for (int t = 0; t < ntiles; ++t) {
+              const int i = ready_tiles[t];
+              ComputeNumericFluxes(tiles, i, dir);
+            }
+#ifdef _OPENMP
+#  pragma omp parallel for
 #endif
-      for (MFIter mfi(states, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const Box tilebox = enclosedCells(mfi.grownnodaltilebox(dir, fluxes[dir].nGrowVect()));
-        auto cfarray = fluxes[dir].const_array(mfi);
-        auto sarray = states.array(mfi);
-        UpdateConservatively(tilebox, sarray, cfarray, dt_over_dx[dir], Direction(dir));
-      }
-    }
+            for (int t = 0; t < ntiles; ++t) {
+              const int i = ready_tiles[t];
+              UpdateConservatively(tiles, i, dt_over_dx[dir], dir);
+            }
+          }
+        }));
   }
 
 private:
@@ -259,18 +356,12 @@ private:
   }
 
   void MakeNewLevelFromCoarse(
-      int,
-      double,
-      const ::amrex::BoxArray&,
-      const ::amrex::DistributionMapping&) override {
+      int, double, const ::amrex::BoxArray&, const ::amrex::DistributionMapping&) override {
     throw std::runtime_error("For simplicity, this example supports only one level.");
   }
 
-  void RemakeLevel(
-      int,
-      double,
-      const ::amrex::BoxArray&,
-      const ::amrex::DistributionMapping&) override {
+  void
+  RemakeLevel(int, double, const ::amrex::BoxArray&, const ::amrex::DistributionMapping&) override {
     throw std::runtime_error("For simplicity, this example supports only one level.");
   }
 
@@ -290,7 +381,7 @@ void WritePlotfiles(const EulerAmrCore& core, double time_point, int step) {
       "Density", "Momentum_X", "Momentum_Y", "Momentum_Z", "TotalEnergy"};
   // int nlevels = 1;
   std::array<char, 256> x_pbuffer{};
-  snprintf(x_pbuffer.data(), x_pbuffer.size(), "AsyncEuler/plt%09d", step);
+  snprintf(x_pbuffer.data(), x_pbuffer.size(), "AsyncEuler1/plt%09d", step);
   std::string plotfilename{x_pbuffer.data()};
   WriteSingleLevelPlotfile(plotfilename, core.states, varnames, core.Geom(0), time_point, step);
 }
